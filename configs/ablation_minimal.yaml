@@ -1,0 +1,93 @@
+# Minimal reward configuration to test core competence mechanism
+encoder:
+  observation_shape: [3, 64, 64]
+  slot_dim: 64
+  num_slots: 5
+
+decoder:
+  observation_shape: [3, 64, 64]
+  slot_dim: 64
+  hidden_channels: [256, 128, 64]
+  initial_spatial: [4, 4]
+  activation: relu
+  output_activation: sigmoid
+  init_log_std: -0.5
+  learn_log_std: true
+
+dynamics:
+  latent_dim: 64
+  action_dim: 17
+  hidden_dim: 256
+  dropout: 0.3
+
+workspace:
+  broadcast_slots: 3
+  self_bias: 1.5
+  novelty_weight: 1.0
+  progress_weight: 0.6
+  cost_weight: 0.05
+  progress_momentum: 0.1
+  action_cost_scale: 1.0
+  ucb_weight: 0.4
+  ucb_beta: 1.0
+
+# ABLATION: Simplified reward with no exploration bonus
+reward:
+  alpha_fast: 0.3              # Faster EMA
+  novelty_high: 10.0           # Disabled anxiety penalty
+  anxiety_penalty: 0.1         # Minimal
+  safety_entropy_floor: 0.1
+  lambda_comp: 2.0             # Double weight
+  lambda_emp: 0.3              # Slightly increased
+  lambda_safety: 0.2           # Slightly increased
+  lambda_explore: 0.0          # DISABLED for ablation
+  component_clip: 5.0
+
+empowerment:
+  latent_dim: 64
+  action_dim: 17
+  hidden_dim: 512              # Increased
+  queue_capacity: 1024         # Increased
+  temperature: 0.5             # Increased
+
+episodic_memory:
+  capacity: 1000
+  key_dim: 64
+
+rollout_capacity: 4096
+batch_size: 128
+optimizer_lr: 0.001
+optimizer_empowerment_weight: 0.05   # Increased
+
+actor:
+  hidden_dim: 256
+  num_layers: 2
+  dropout: 0.05
+
+critic:
+  hidden_dim: 256
+  num_layers: 2
+  dropout: 0.05
+
+self_state_dim: 4              # Increased to capture all vitals
+dream_chunk_size: 5
+num_dream_chunks: 2
+discount_gamma: 0.99
+gae_lambda: 0.95
+entropy_coef: 0.03
+critic_coef: 0.5
+world_model_coef: 1.0
+
+world_model_ensemble: 5
+device: cuda
+adaptive_entropy: true
+adaptive_entropy_target: 1.0
+adaptive_entropy_scale: 5.0
+
+# ABLATION: Disable cognitive wave
+cognitive_wave:
+  stimulus_history_window: 1000
+  stimulus_ema_momentum: 0.1
+  dream_entropy_scale: 1.0     # No boosting
+  actor_entropy_scale: 1.0     # No boosting
+  learning_rate_scale: 1.0     # No scaling

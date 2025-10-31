@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dtc_agent"
+version = "0.1.0"
+description = "SC-GWT v2.0 research prototype"
+readme = "ABOUT.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["reinforcement-learning", "model-based-rl", "global-workspace"]
+authors = [
+    { name = "SC-GWT Team" }
+]
+dependencies = [
+    "torch>=2.3",
+    "numpy>=1.26",
+    "einops>=0.7",
+    "tqdm>=4.66",
+    "omegaconf>=2.3",
+    "wandb>=0.17",
+    "gymnasium>=0.29",
+    "minigrid>=2.3",
+    "crafter>=1.8.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "mypy>=1.10",
+    "ruff>=0.6"
+]
+
+[tool.setuptools.packages.find]
+where = ["dtc_agent"]

@@ -1,0 +1,82 @@
+encoder:
+  observation_shape: [3, 32, 32]
+  slot_dim: 32
+  num_slots: 3
+
+decoder:
+  observation_shape: [3, 32, 32]
+  slot_dim: 32
+  hidden_channels: [128, 64]
+  initial_spatial: [4, 4]
+  activation: elu
+  output_activation: sigmoid
+  init_log_std: -0.7
+  learn_log_std: false
+
+dynamics:
+  latent_dim: 32
+  action_dim: 17
+  hidden_dim: 128
+
+workspace:
+  broadcast_slots: 2
+  self_bias: 0.5
+  novelty_weight: 1.2
+  progress_weight: 0.3
+  cost_weight: 0.05
+  progress_momentum: 0.15
+  action_cost_scale: 0.5
+  ucb_weight: 0.3
+  ucb_beta: 0.8
+
+reward:
+  alpha_fast: 0.2
+  novelty_high: 1.0
+  anxiety_penalty: 0.2
+  safety_entropy_floor: 0.2
+  lambda_comp: 0.7
+  lambda_emp: 0.3
+  lambda_safety: 0.3
+  lambda_explore: 0.5
+
+empowerment:
+  latent_dim: 32
+  action_dim: 17
+  hidden_dim: 96
+  queue_capacity: 64
+  temperature: 0.2
+
+episodic_memory:
+  capacity: 100
+  key_dim: 32
+rollout_capacity: 1024
+batch_size: 32
+optimizer_lr: 0.001
+optimizer_empowerment_weight: 0.05
+actor:
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.0
+
+critic:
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.0
+
+self_state_dim: 2
+dream_chunk_size: 3
+num_dream_chunks: 2
+discount_gamma: 0.95
+gae_lambda: 0.9
+entropy_coef: 0.02
+critic_coef: 0.5
+world_model_coef: 1.0
+
+world_model_ensemble: 3
+device: cpu
+cognitive_wave:
+  stimulus_history_window: 250
+  stimulus_ema_momentum: 0.2
+  dream_entropy_scale: 5.0
+  actor_entropy_scale: 2.5
+  learning_rate_scale: 1.5
