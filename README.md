@@ -103,19 +103,22 @@ Most RL agents require carefully shaped reward functions and curriculum design. 
 
 This project is a standard Python package, configured with `omegaconf` and built on `torch`.
 
-### 1. Clone and Install
+### 1. Clone and Install (Conda Recommended)
+
+For GPU-accelerated training, install the core CUDA-enabled dependencies with `conda` before using `pip` for the remaining Python packages.
 
 ```bash
 # Clone the repository
 git clone https://github.com/augo-augo/DTC-agent.git
 cd DTC-agent
 
-# Create a virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Create a conda environment with PyTorch and FAISS that match your CUDA toolkit
+conda create -n dtc python=3.10 pytorch-cuda=11.8 pytorch faiss-gpu -c pytorch -c conda-forge
 
-# Install the package in editable mode
-# This also installs dependencies from pyproject.toml
+# Activate the environment
+conda activate dtc
+
+# Install the package in editable mode (installs remaining dependencies from pyproject.toml)
 pip install -e .
 ```
 
