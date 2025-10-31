@@ -149,22 +149,6 @@ python -m dtc_agent.training --config configs/default.yaml --device cuda
 
 ---
 
-## Citation
-
-If you find this work useful in your research, please cite the following paper:
-
-```bibtex
-@article{kilfoy2025dtc,
-  title={DTC: Emergent Developmental Curricula from a Dual-Timescale Competence Drive},
-  author={Kilfoy, Benjamin},
-  journal={arXiv preprint arXiv:2501.XXXXX},
-  year={2025}
-}
-```
-
-*(Update with your arXiv link once published)*
-
----
 
 ## License
 
