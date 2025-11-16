@@ -78,7 +78,7 @@ entropy_coef: 0.03
 critic_coef: 0.5
 world_model_coef: 1.0
 
-world_model_ensemble: 5  # Increased from 3 to generate more epistemic novelty
+world_model_ensemble: 3  # Reduced from 5 to save GPU memory
 device: cuda
 adaptive_entropy: true
 adaptive_entropy_target: 1.0
