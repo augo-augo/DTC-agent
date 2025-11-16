@@ -261,6 +261,10 @@ class Agent:
         self.progress_momentum = config.workspace.progress_momentum
         self.action_cost_scale = config.workspace.action_cost_scale
 
+        # Clear CUDA cache before initializing models to maximize available memory
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
         wm_config = WorldModelConfig(
             encoder=config.encoder,
             decoder=config.decoder,

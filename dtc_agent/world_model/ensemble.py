@@ -43,7 +43,9 @@ class WorldModelEnsemble(nn.Module):
         self.config = config
         self.encoder = SlotAttentionEncoder(config.encoder)
         self.decoder = SharedDecoder(config.decoder)
-        self.frozen_decoder = copy.deepcopy(self.decoder)
+        # Keep frozen decoder on CPU to save GPU memory
+        # It will be moved to the appropriate device only during inference
+        self.frozen_decoder = copy.deepcopy(self.decoder).cpu()
         for param in self.frozen_decoder.parameters():
             param.requires_grad_(False)
         self.dynamics_models = nn.ModuleList()
@@ -61,7 +63,9 @@ class WorldModelEnsemble(nn.Module):
     @torch.no_grad()
     def refresh_frozen_decoder(self) -> None:
         """Synchronize the frozen observer head with the trainable decoder."""
-        self.frozen_decoder.load_state_dict(self.decoder.state_dict())
+        # Load state dict on CPU to avoid unnecessary GPU memory allocation
+        state_dict = {k: v.cpu() for k, v in self.decoder.state_dict().items()}
+        self.frozen_decoder.load_state_dict(state_dict)
 
     def forward(self, observation: torch.Tensor) -> dict[str, torch.Tensor]:
         """Encode an observation into latent slots.
@@ -100,8 +104,28 @@ class WorldModelEnsemble(nn.Module):
         Returns:
             List of observation distributions for each latent input.
         """
-        decoder = self.frozen_decoder if use_frozen else self.decoder
-        return [decoder(latent) for latent in predicted_latents]
+        predicted_latents_list = list(predicted_latents)
+        if not predicted_latents_list:
+            return []
+
+        if use_frozen:
+            # Move frozen decoder to the same device as predicted latents temporarily
+            device = predicted_latents_list[0].device
+            # Only move to GPU if not already there
+            if next(self.frozen_decoder.parameters()).device != device:
+                self.frozen_decoder = self.frozen_decoder.to(device)
+
+            result = [self.frozen_decoder(latent) for latent in predicted_latents_list]
+
+            # Move back to CPU after use to free GPU memory
+            if device.type == 'cuda':
+                self.frozen_decoder = self.frozen_decoder.cpu()
+                # Clear CUDA cache to immediately free memory
+                torch.cuda.empty_cache()
+
+            return result
+        else:
+            return [self.decoder(latent) for latent in predicted_latents_list]
 
     def get_epistemic_disagreement(
         self, predicted_latents: List[torch.Tensor]
