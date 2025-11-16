@@ -434,9 +434,11 @@ class Agent:
             and self.self_state_encoder is not None
             and self.self_state_dim > 0
         ):
-            projected_state = self.self_state_encoder(
-                self_state.to(self.device, non_blocking=True)
-            )
+            self_state_device = self_state.to(self.device, non_blocking=True)
+            # Synchronize to ensure self_state transfer is complete before encoder forward pass
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            projected_state = self.self_state_encoder(self_state_device)
             projected_state = torch.nn.functional.normalize(projected_state, dim=-1)
             state_similarity = (
                 slot_norm * projected_state.unsqueeze(1)
@@ -531,6 +533,10 @@ class Agent:
         else:
             state_tensor = None
 
+        # Synchronize CUDA to ensure all async transfers are complete before model inference
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
         if state_tensor is not None:
             with self._state_lock:
                 self._latest_self_state = state_tensor.detach()
@@ -551,6 +557,9 @@ class Agent:
                     memory_context = self.get_memory_context(latents["z_self"])
                 if action is not None:
                     action_for_routing = action.to(self.device, non_blocking=True)
+                    # Synchronize to ensure action transfer is complete
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize(self.device)
                 else:
                     action_for_routing = torch.zeros(
                         batch, self.config.dynamics.action_dim, device=self.device
@@ -616,6 +625,9 @@ class Agent:
                     )
                 else:
                     action = action.to(self.device, non_blocking=True)
+                    # Synchronize to ensure action transfer is complete
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize(self.device)
 
                 latent_state = broadcast.mean(dim=1)
                 predictions = self.world_model.predict_next_latents(latent_state, action)
