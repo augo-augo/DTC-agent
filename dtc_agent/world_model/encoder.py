@@ -134,48 +134,57 @@ class _SlotAttention(nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        b, n, d = inputs.shape
         input_dtype = inputs.dtype
-        inputs = self.norm_inputs(inputs.float())
-        mu = self.slot_mu.expand(b, self.num_slots, -1)
-        sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
-        slots = mu + sigma * torch.randn_like(mu)
+        device_type = inputs.device.type
+        autocast_fn = getattr(torch.amp, "autocast", None)
+        if autocast_fn is not None and device_type in ("cuda", "cpu"):
+            autocast_ctx = autocast_fn(device_type=device_type, enabled=False)
+        else:
+            autocast_ctx = nullcontext()
 
-        k = self.project_k(inputs)
-        v = self.project_v(inputs)
+        with autocast_ctx:
+            b, n, d = inputs.shape
+            working_inputs = self.norm_inputs(inputs.float())
+            mu = self.slot_mu.expand(b, self.num_slots, -1)
+            sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
+            slots = mu + sigma * torch.randn_like(mu)
 
-        for _ in range(self.iters):
-            slots_prev = slots
-            slots = self.norm_slots(slots.float())
-            q = self.project_q(slots)
+            k = self.project_k(working_inputs)
+            v = self.project_v(working_inputs)
 
-            dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
-            dots = torch.clamp(dots, min=-20.0, max=20.0)
+            for _ in range(self.iters):
+                slots_prev = slots
+                normalized_slots = self.norm_slots(slots.float())
+                q = self.project_q(normalized_slots)
 
-            attn = dots.softmax(dim=-1) + self.epsilon
-            attn_sum = attn.sum(dim=-2, keepdim=True).clamp(min=1e-6)
-            attn = attn / attn_sum
+                dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
+                dots = torch.clamp(dots, min=-20.0, max=20.0)
 
-            updates = torch.matmul(attn.transpose(1, 2), v)
+                attn = dots.softmax(dim=-1) + self.epsilon
+                attn_sum = attn.sum(dim=-2, keepdim=True).clamp(min=1e-6)
+                attn = attn / attn_sum
 
-            updates_float = updates.reshape(-1, d).float()
-            slots_prev_float = slots_prev.reshape(-1, d).float()
+                updates = torch.matmul(attn.transpose(1, 2), v)
 
-            device_type = updates_float.device.type
-            autocast_fn = getattr(torch.amp, "autocast", None)
-            if autocast_fn is not None and device_type in ("cuda", "cpu"):
-                autocast_ctx = autocast_fn(device_type=device_type, enabled=False)
-            else:
-                autocast_ctx = nullcontext()
-            with autocast_ctx:
-                slots = self.gru(
-                    updates_float,
-                    slots_prev_float.clone(),
-                )
-            slots = slots.view(b, self.num_slots, d)
-            normed_slots = self.norm_mlp(slots.float())
-            mlp_update = self.mlp(normed_slots)
-            slots = slots + mlp_update
+                updates_float = updates.reshape(-1, d).float()
+                slots_prev_float = slots_prev.reshape(-1, d).float()
+
+                device_type = updates_float.device.type
+                autocast_fn_inner = getattr(torch.amp, "autocast", None)
+                if autocast_fn_inner is not None and device_type in ("cuda", "cpu"):
+                    autocast_ctx_inner = autocast_fn_inner(device_type=device_type, enabled=False)
+                else:
+                    autocast_ctx_inner = nullcontext()
+                with autocast_ctx_inner:
+                    slots = self.gru(
+                        updates_float,
+                        slots_prev_float.clone(),
+                    )
+                slots = slots.view(b, self.num_slots, d)
+                normed_slots = self.norm_mlp(slots.float())
+                mlp_update = self.mlp(normed_slots)
+                slots = slots + mlp_update
+
         return slots.to(dtype=input_dtype)
 
 
