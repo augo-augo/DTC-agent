@@ -1,37 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
-import sys
-from typing import TextIO
 
 import torch
 from torch import nn
 
 from dtc_agent.utils import sanitize_tensor
-
-
-def _safe_console_write(message: str, stream: TextIO) -> None:
-    data = (message + "\n").encode("utf-8", "replace")
-    fileno = getattr(stream, "fileno", None)
-    if callable(fileno):
-        try:
-            os.write(fileno(), data)
-            return
-        except OSError:
-            pass
-    try:
-        stream.write(message + "\n")
-    except Exception:
-        pass
-
-
-def _console_info(message: str) -> None:
-    _safe_console_write(message, sys.stdout)
-
-
-def _console_warn(message: str) -> None:
-    _safe_console_write(message, sys.stderr)
+from dtc_agent.utils.logging import _emit_console_info, _emit_console_warning
 
 
 @dataclass
@@ -112,7 +87,9 @@ class InfoNCEEmpowermentEstimator(nn.Module):
         # any division to prevent NaNs from corrupting downstream gradients.
         with torch.no_grad():
             if not torch.isfinite(self.temperature).all():
-                _console_warn("[Empowerment] CRITICAL: Temperature corrupted, resetting")
+                _emit_console_warning(
+                    "[Empowerment] CRITICAL: Temperature corrupted, resetting"
+                )
                 self.temperature.copy_(
                     torch.tensor(
                         self.config.temperature,
@@ -141,14 +118,22 @@ class InfoNCEEmpowermentEstimator(nn.Module):
                 labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
                 predicted = logits.argmax(dim=-1)
                 accuracy = (predicted == labels).float().mean()
-                _console_info("[Empowerment Diagnostic]")
-                _console_info(f"  Logits: mean={logits.mean():.3f}, std={logits.std():.3f}")
-                _console_info(f"  Temperature: {float(temperature.mean()):.4f}")
-                _console_info(f"  Contrastive accuracy: {accuracy:.3f} (target: 0.6-0.8)")
+                _emit_console_info("[Empowerment Diagnostic]")
+                _emit_console_info(
+                    f"  Logits: mean={logits.mean():.3f}, std={logits.std():.3f}"
+                )
+                _emit_console_info(f"  Temperature: {float(temperature.mean()):.4f}")
+                _emit_console_info(
+                    f"  Contrastive accuracy: {accuracy:.3f} (target: 0.6-0.8)"
+                )
                 if accuracy > 0.95:
-                    _console_warn("  ⚠️  WARNING: Accuracy too high - queue may be contaminated")
+                    _emit_console_warning(
+                        "  ⚠️  WARNING: Accuracy too high - queue may be contaminated"
+                    )
                 elif accuracy < 0.4:
-                    _console_warn("  ⚠️  WARNING: Accuracy too low - embeddings may be broken")
+                    _emit_console_warning(
+                        "  ⚠️  WARNING: Accuracy too low - embeddings may be broken"
+                    )
 
         labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
         loss = nn.functional.cross_entropy(

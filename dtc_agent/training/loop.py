@@ -110,3 +110,13 @@ class TrainingLoop:
 
         return self.trainer.train_step()
 
+    def _compute_gae(
+        self,
+        rewards: "torch.Tensor",
+        values: "torch.Tensor",
+        next_value: "torch.Tensor",
+    ) -> tuple["torch.Tensor", "torch.Tensor"]:
+        """Compatibility shim forwarding to :class:`Trainer`."""
+
+        return self.trainer._compute_gae(rewards, values, next_value)
+
