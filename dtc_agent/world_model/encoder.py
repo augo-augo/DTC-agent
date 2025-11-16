@@ -144,7 +144,7 @@ class _SlotAttention(nn.Module):
 
         with autocast_ctx:
             b, n, d = inputs.shape
-            working_inputs = self.norm_inputs(inputs.float())
+            working_inputs = self.norm_inputs(inputs.float()).contiguous()
             mu = self.slot_mu.expand(b, self.num_slots, -1)
             sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
             slots = mu + sigma * torch.randn_like(mu)
@@ -154,7 +154,7 @@ class _SlotAttention(nn.Module):
 
             for _ in range(self.iters):
                 slots_prev = slots
-                normalized_slots = self.norm_slots(slots.float())
+                normalized_slots = self.norm_slots(slots.float()).contiguous()
                 q = self.project_q(normalized_slots)
 
                 dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
@@ -180,7 +180,7 @@ class _SlotAttention(nn.Module):
                         updates_float,
                         slots_prev_float.clone(),
                     )
-                slots = slots.view(b, self.num_slots, d)
+                slots = slots.view(b, self.num_slots, d).contiguous()
                 normed_slots = self.norm_mlp(slots.float())
                 mlp_update = self.mlp(normed_slots)
                 slots = slots + mlp_update
@@ -246,7 +246,7 @@ class SlotAttentionEncoder(nn.Module):
             working_obs = observation.to(dtype=torch.float32)
             features = self.backbone(working_obs)
             batch, channels, height, width = features.shape
-            flat = features.view(batch, channels, height * width).permute(0, 2, 1)
+            flat = features.flatten(start_dim=2).transpose(1, 2).contiguous()
             flat = self.positional(flat)
             flat = self.pre_slots(flat)
             slots = self.slot_attention(flat)
