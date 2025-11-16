@@ -25,21 +25,22 @@ workspace:
   novelty_weight: 1.0
   progress_weight: 0.6
   cost_weight: 0.05
-  progress_momentum: 0.1
+  progress_momentum: 0.25
   action_cost_scale: 1.0
   ucb_weight: 0.4
   ucb_beta: 1.0
 
 reward:
-  alpha_fast: 0.2
-  novelty_high: 10.0
+  alpha_fast: 0.3
+  alpha_slow: 0.02
+  novelty_high: 2.0
   anxiety_penalty: 0.1
   safety_entropy_floor: 0.1
-  lambda_comp: 1.5      # Decreased from 2.0 to reduce pull towards predictable states
+  lambda_comp: 1.0      # Reduced to let raw novelty lead curiosity
   lambda_emp: 0.5       # Increased from 0.3 to boost drive for influence
   lambda_safety: 0.5    # Increased from 0.15 to more strongly penalize "dark room"
   lambda_survival: 0.1
-  lambda_explore: 0.3   # Increased from 0.1 to capitalize on revived novelty signal
+  lambda_explore: 0.65  # Further increased to reward raw novelty directly
   component_clip: 3.0
 
 empowerment:
@@ -55,7 +56,7 @@ episodic_memory:
 
 rollout_capacity: 4096
 batch_size: 128
-optimizer_lr: 0.0003
+optimizer_lr: 0.0005
 optimizer_empowerment_weight: 0.03
 
 actor:
@@ -69,23 +70,23 @@ critic:
   dropout: 0.05
 
 self_state_dim: 4  # Expanded to cover all Crafter vitals
-dream_chunk_size: 5
-num_dream_chunks: 2
+dream_chunk_size: 6
+num_dream_chunks: 3
 discount_gamma: 0.99
 gae_lambda: 0.92  # Decreased from 0.95 to stabilize critic advantage estimates
-entropy_coef: 0.03
+entropy_coef: 0.05
 critic_coef: 0.5
 world_model_coef: 1.0
 
 world_model_ensemble: 5  # Increased from 3 to generate more epistemic novelty
 device: cuda
 adaptive_entropy: true
-adaptive_entropy_target: 1.0
-adaptive_entropy_scale: 5.0
+adaptive_entropy_target: 1.2
+adaptive_entropy_scale: 6.0
 
 cognitive_wave:
-  stimulus_history_window: 1000
-  stimulus_ema_momentum: 0.1
-  dream_entropy_scale: 10.0
-  actor_entropy_scale: 5.0
-  learning_rate_scale: 2.0
+  stimulus_history_window: 350
+  stimulus_ema_momentum: 0.25
+  dream_entropy_scale: 14.0
+  actor_entropy_scale: 6.5
+  learning_rate_scale: 2.5
