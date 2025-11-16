@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import torch
 
 from .stability import sanitize_tensor
@@ -19,6 +20,7 @@ class RunningMeanStd:
         self.mean = torch.zeros(1, device=base_device)
         self.var = torch.ones(1, device=base_device)
         self.count = torch.tensor(self.epsilon, device=base_device)
+        self._lock = threading.Lock()
 
     def to(self, device: torch.device | str) -> "RunningMeanStd":
         """Move the internal buffers to ``device``."""
@@ -26,10 +28,11 @@ class RunningMeanStd:
         target = torch.device(device)
         if target == self.device:
             return self
-        self.mean = self.mean.to(target)
-        self.var = self.var.to(target)
-        self.count = self.count.to(target)
-        self.device = target
+        with self._lock:
+            self.mean = self.mean.to(target)
+            self.var = self.var.to(target)
+            self.count = self.count.to(target)
+            self.device = target
         return self
 
     def update(self, x: torch.Tensor) -> None:
@@ -45,7 +48,8 @@ class RunningMeanStd:
         batch_var = values.var(dim=0, unbiased=False)
         batch_count = values.shape[0]
 
-        self._update_from_moments(batch_mean, batch_var, batch_count)
+        with self._lock:
+            self._update_from_moments(batch_mean, batch_var, batch_count)
 
     def _update_from_moments(
         self, batch_mean: torch.Tensor, batch_var: torch.Tensor, batch_count: float
@@ -59,6 +63,21 @@ class RunningMeanStd:
         self.mean = new_mean
         self.var = m2 / total_count
         self.count = total_count
+
+    def get_mean(self) -> torch.Tensor:
+        """Thread-safe read of the current mean."""
+        with self._lock:
+            return self.mean.clone()
+
+    def get_var(self) -> torch.Tensor:
+        """Thread-safe read of the current variance."""
+        with self._lock:
+            return self.var.clone()
+
+    def get_stats(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Thread-safe read of mean and variance together."""
+        with self._lock:
+            return self.mean.clone(), self.var.clone()
 
 
 class RewardNormalizer:
@@ -93,8 +112,10 @@ class RewardNormalizer:
         if torch.isfinite(reward_fp32).all():
             self.running_stats.update(reward_fp32)
 
-        mean = sanitize_tensor(self.running_stats.mean, replacement=0.0)
-        var = sanitize_tensor(self.running_stats.var, replacement=1.0)
+        # Thread-safe read of stats
+        mean, var = self.running_stats.get_stats()
+        mean = sanitize_tensor(mean, replacement=0.0)
+        var = sanitize_tensor(var, replacement=1.0)
         min_var = self._min_variance if self._min_variance is not None else self.running_stats.epsilon
         var = torch.clamp(var, min=min_var, max=self._max_variance)
 

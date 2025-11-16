@@ -352,8 +352,9 @@ class Trainer:
         }
         memory_context = self.agent.get_memory_context(initial_latents["z_self"]).detach()
         dream_self_state: torch.Tensor | None = None
-        if self.agent._latest_self_state is not None:
-            dream_self_state = self.agent._latest_self_state.to(
+        latest_self_state = self.agent.get_latest_self_state()
+        if latest_self_state is not None:
+            dream_self_state = latest_self_state.to(
                 self.device, non_blocking=True
             )
         current_latents = initial_latents
@@ -536,8 +537,9 @@ class Trainer:
             self.config.entropy_coef * wave_modifiers["actor_entropy_scale"]
         )
         if self.config.adaptive_entropy:
+            novelty_mean = self.agent.novelty_tracker.get_mean()
             current_avg_novelty = float(
-                self.agent.novelty_tracker.mean.clamp(min=0.0).item()
+                novelty_mean.clamp(min=0.0).item()
             )
             if current_avg_novelty < self.config.adaptive_entropy_target:
                 novelty_deficit = self.config.adaptive_entropy_target - current_avg_novelty
