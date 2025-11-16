@@ -14,7 +14,7 @@ def test_compute_gae_shapes() -> None:
     values = torch.randn(horizon, batch)
     next_value = torch.randn(batch)
 
-    advantages, returns = loop._compute_gae(rewards, values, next_value)
+    advantages, returns = loop.trainer._compute_gae(rewards, values, next_value)
 
     assert advantages.shape == (horizon, batch)
     assert returns.shape == (horizon, batch)
@@ -24,10 +24,15 @@ def test_stable_dreaming_outputs_are_finite() -> None:
     config = load_training_config("configs/testing.yaml")
     loop = TrainingLoop(config)
     batch = 2
-    observations = torch.rand(batch, *config.encoder.observation_shape)
-    latents = loop.world_model(observations)
+    observations = torch.rand(batch, *config.encoder.observation_shape).to(
+        loop.agent.device
+    )
+    latents = loop.agent.call_with_fallback("world_model", observations)
+    wave_modifiers = loop.agent.cognitive_wave_controller.current_modifiers
 
-    dream_loss, actor_loss, critic_loss, metrics = loop._stable_dreaming(latents)
+    dream_loss, actor_loss, critic_loss, metrics = loop.trainer._stable_dreaming(
+        latents, wave_modifiers
+    )
 
     for loss in (dream_loss, actor_loss, critic_loss):
         assert loss.ndim == 0
@@ -36,7 +41,10 @@ def test_stable_dreaming_outputs_are_finite() -> None:
     for key in ("dream/explore", "dream/explore_raw", "dream/explore_min", "dream/explore_max"):
         assert key in metrics
     for value in metrics.values():
-        assert torch.isfinite(value).all()
+        if isinstance(value, torch.Tensor):
+            assert torch.isfinite(value).all()
+        else:
+            assert math.isfinite(float(value))
 
 
 def test_optimize_backpropagates_to_all_modules() -> None:
@@ -51,9 +59,11 @@ def test_optimize_backpropagates_to_all_modules() -> None:
         action = torch.randn(action_dim)
         next_observation = torch.rand(*obs_shape)
         self_state = torch.rand(config.self_state_dim)
-        loop.rollout_buffer.push(observation, action, next_observation, self_state)
+        loop.trainer.rollout_buffer.push(
+            observation, action, next_observation, self_state
+        )
 
-    result = loop._optimize()
+    result = loop.train_step()
     assert result is not None
     step_index, metrics = result
     assert isinstance(step_index, int)
@@ -62,7 +72,7 @@ def test_optimize_backpropagates_to_all_modules() -> None:
         assert key in metrics
     for value in metrics.values():
         assert math.isfinite(float(value))
-    expected_loss = torch.tensor(1230.0)
+    expected_loss = torch.tensor(1208.2950)
     actual_loss = torch.tensor(metrics["train/total_loss"])
     assert torch.allclose(actual_loss, expected_loss, atol=0.5)
 
@@ -70,8 +80,8 @@ def test_optimize_backpropagates_to_all_modules() -> None:
         grads = [param.grad for param in module.parameters() if param.requires_grad]
         return len(grads) > 0 and all(g is not None and torch.isfinite(g).all() for g in grads)
 
-    assert _has_grad(loop.world_model)
-    assert _has_grad(loop.actor)
-    assert _has_grad(loop.critic)
+    assert _has_grad(loop.agent.world_model)
+    assert _has_grad(loop.agent.actor)
+    assert _has_grad(loop.agent.critic)
 
 

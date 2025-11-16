@@ -324,13 +324,13 @@ def slot_attention_forward_stable(self, inputs: torch.Tensor) -> torch.Tensor:
 
 def optimize_with_loss_check() -> None:  # pragma: no cover - helper inserted inline
     raise RuntimeError(
-        "This helper should not be called directly; copy the snippet into TrainingLoop._optimize."
+        "This helper should not be called directly; copy the snippet into Trainer.train_step."
     )
 
 
 def add_gradient_sanitization() -> None:  # pragma: no cover - helper inserted inline
     raise RuntimeError(
-        "This helper should not be called directly; copy the snippet into TrainingLoop._optimize."
+        "This helper should not be called directly; copy the snippet into Trainer.train_step."
     )
 
 

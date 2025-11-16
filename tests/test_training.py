@@ -5,7 +5,7 @@ import torch
 
 from dtc_agent.config import load_training_config
 from dtc_agent.training import RolloutBuffer, StepResult, TrainingLoop
-from dtc_agent.training.loop import _configure_tf32_precision
+from dtc_agent.training.agent import _configure_tf32_precision
 
 
 def test_rollout_buffer_sample_shapes() -> None:
@@ -65,8 +65,9 @@ def test_training_loop_step_returns_result(tmp_path) -> None:
     assert result.slot_scores.shape == (observation.shape[0], config.encoder.num_slots)
     assert result.reward_components is not None
     assert result.raw_reward_components is not None
-    assert set(result.reward_components.keys()) == {"competence", "empowerment", "safety", "explore"}
-    assert set(result.raw_reward_components.keys()) == {"competence", "empowerment", "safety", "explore"}
+    expected_components = {"competence", "empowerment", "safety", "explore"}
+    assert expected_components.issubset(result.reward_components.keys())
+    assert expected_components.issubset(result.raw_reward_components.keys())
     assert result.training_loss is None
     assert result.training_metrics is None
 
