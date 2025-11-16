@@ -159,7 +159,7 @@ def _actor_loop(
         episode_frames = [_frame_to_chw(frame)]
         while not stop_event.is_set():
             with torch.no_grad():
-                policy_result = loop.step(
+                policy_result = loop.agent.act(
                     observation_tensor,
                     self_state=self_state_vec if self_state_vec.numel() > 0 else None,
                     train=False,
@@ -170,11 +170,14 @@ def _actor_loop(
             next_tensor = _preprocess_frame(
                 next_observation, config.encoder.observation_shape, runtime_device
             )
-            loop.store_transition(
+            transition_state = policy_result.self_state
+            if transition_state is None and self_state_vec.numel() > 0:
+                transition_state = self_state_vec
+            loop.trainer.store_transition(
                 observation_tensor,
                 policy_result.action,
                 next_tensor,
-                self_state_vec if self_state_vec.numel() > 0 else None,
+                transition_state,
             )
             next_episode_steps = episode_steps + 1
             next_self_state_vec = _compute_self_state(
@@ -475,7 +478,7 @@ def main() -> None:
             processed = logger.process_queue(metrics_queue)
 
             with policy_lock:
-                optimize_result = loop._optimize()
+                optimize_result = loop.train_step()
 
             with steps_lock:
                 current_step = shared_state["steps"]
@@ -498,7 +501,7 @@ def main() -> None:
                 last_flush_step = current_step
 
             with policy_lock:
-                optimize_result = loop._optimize()
+                optimize_result = loop.train_step()
             if optimize_result:
                 step_index, training_metrics = optimize_result
                 training_metrics.setdefault(
