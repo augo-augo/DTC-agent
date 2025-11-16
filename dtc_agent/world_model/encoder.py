@@ -136,7 +136,7 @@ class _SlotAttention(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         b, n, d = inputs.shape
         input_dtype = inputs.dtype
-        inputs = self.norm_inputs(inputs.float()).to(dtype=input_dtype)
+        inputs = self.norm_inputs(inputs.float())
         mu = self.slot_mu.expand(b, self.num_slots, -1)
         sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
         slots = mu + sigma * torch.randn_like(mu)
@@ -146,8 +146,7 @@ class _SlotAttention(nn.Module):
 
         for _ in range(self.iters):
             slots_prev = slots
-            slots_dtype = slots.dtype
-            slots = self.norm_slots(slots.float()).to(dtype=slots_dtype)
+            slots = self.norm_slots(slots.float())
             q = self.project_q(slots)
 
             dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
@@ -176,8 +175,8 @@ class _SlotAttention(nn.Module):
             slots = slots.view(b, self.num_slots, d)
             normed_slots = self.norm_mlp(slots.float())
             mlp_update = self.mlp(normed_slots)
-            slots = slots + mlp_update.to(dtype=slots.dtype)
-        return slots
+            slots = slots + mlp_update
+        return slots.to(dtype=input_dtype)
 
 
 class SlotAttentionEncoder(nn.Module):
