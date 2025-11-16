@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
+import threading
 from typing import Any, Callable, ContextManager, ParamSpec, Protocol, TypeVar, cast, TYPE_CHECKING
 
 import torch
@@ -186,10 +187,12 @@ class CognitiveWaveController:
         self.env_stimulus_ema = RunningMeanStd(device=device, epsilon=1e-4)
         self._ema_value: torch.Tensor | None = None
         self._current_modifiers = self._default_modifiers()
+        self._lock = threading.Lock()
 
     @property
     def current_modifiers(self) -> dict[str, float]:
-        return dict(self._current_modifiers)
+        with self._lock:
+            return dict(self._current_modifiers)
 
     def update(self, raw_environmental_novelty: float, step: int) -> None:
         del step
@@ -197,41 +200,43 @@ class CognitiveWaveController:
             [raw_environmental_novelty], device=self.device, dtype=torch.float32
         )
         self.env_stimulus_ema.update(novelty_tensor)
-        if self._ema_value is None:
-            self._ema_value = novelty_tensor.clone()
-        else:
-            momentum = float(self.config.stimulus_ema_momentum)
-            momentum = max(0.0, min(1.0, momentum))
-            self._ema_value = (
-                (1.0 - momentum) * self._ema_value + momentum * novelty_tensor
-            )
-        self.stimulus_history.append(raw_environmental_novelty)
 
-        if len(self.stimulus_history) < self.config.stimulus_history_window:
-            self._current_modifiers = self._default_modifiers()
-            return
+        with self._lock:
+            if self._ema_value is None:
+                self._ema_value = novelty_tensor.clone()
+            else:
+                momentum = float(self.config.stimulus_ema_momentum)
+                momentum = max(0.0, min(1.0, momentum))
+                self._ema_value = (
+                    (1.0 - momentum) * self._ema_value + momentum * novelty_tensor
+                )
+            self.stimulus_history.append(raw_environmental_novelty)
 
-        assert self._ema_value is not None
-        stimulus_level = float(self._ema_value.item())
-        stimulus_baseline = sum(self.stimulus_history) / len(self.stimulus_history)
+            if len(self.stimulus_history) < self.config.stimulus_history_window:
+                self._current_modifiers = self._default_modifiers()
+                return
 
-        stimulus_deficit = max(0.0, stimulus_baseline - stimulus_level)
-        stimulus_surplus = max(0.0, stimulus_level - stimulus_baseline)
+            assert self._ema_value is not None
+            stimulus_level = float(self._ema_value.item())
+            stimulus_baseline = sum(self.stimulus_history) / len(self.stimulus_history)
 
-        dream_boost = 1.0 + (stimulus_deficit * self.config.dream_entropy_scale)
-        dream_boost = max(1.0, min(self.config.dream_entropy_scale, dream_boost))
-        actor_boost = 1.0 + (stimulus_deficit * self.config.actor_entropy_scale)
-        actor_boost = max(1.0, min(self.config.actor_entropy_scale, actor_boost))
-        lr_scale = 1.0 + (stimulus_surplus * self.config.learning_rate_scale)
-        lr_scale = max(1.0, min(self.config.learning_rate_scale, lr_scale))
+            stimulus_deficit = max(0.0, stimulus_baseline - stimulus_level)
+            stimulus_surplus = max(0.0, stimulus_level - stimulus_baseline)
 
-        self._current_modifiers = {
-            "dream_entropy_boost": dream_boost,
-            "actor_entropy_scale": actor_boost,
-            "learning_rate_scale": lr_scale,
-            "stimulus_level": stimulus_level,
-            "stimulus_deficit": stimulus_deficit,
-        }
+            dream_boost = 1.0 + (stimulus_deficit * self.config.dream_entropy_scale)
+            dream_boost = max(1.0, min(self.config.dream_entropy_scale, dream_boost))
+            actor_boost = 1.0 + (stimulus_deficit * self.config.actor_entropy_scale)
+            actor_boost = max(1.0, min(self.config.actor_entropy_scale, actor_boost))
+            lr_scale = 1.0 + (stimulus_surplus * self.config.learning_rate_scale)
+            lr_scale = max(1.0, min(self.config.learning_rate_scale, lr_scale))
+
+            self._current_modifiers = {
+                "dream_entropy_boost": dream_boost,
+                "actor_entropy_scale": actor_boost,
+                "learning_rate_scale": lr_scale,
+                "stimulus_level": stimulus_level,
+                "stimulus_deficit": stimulus_deficit,
+            }
 
     def _default_modifiers(self) -> dict[str, float]:
         return {
@@ -323,10 +328,18 @@ class Agent:
         self.cognitive_wave_controller = CognitiveWaveController(
             config.cognitive_wave, self.device
         )
+        self._state_lock = threading.Lock()  # Protects shared state accessed by multiple threads
 
     @property
     def step_count(self) -> int:
         return self._step_count
+
+    def get_latest_self_state(self) -> torch.Tensor | None:
+        """Thread-safe read of the latest self state."""
+        with self._state_lock:
+            if self._latest_self_state is None:
+                return None
+            return self._latest_self_state.clone()
 
     def attach_reward_generator(self, reward: IntrinsicRewardGenerator) -> None:
         self.reward = reward
@@ -432,20 +445,23 @@ class Agent:
         self_mask = torch.clamp(self_similarity + state_similarity, min=0.0)
 
         batch_mean = slot_novelty.mean(dim=0).detach().cpu()
-        if self._ucb_mean is None or self._ucb_counts is None:
-            self._ucb_mean = batch_mean.clone()
-            self._ucb_counts = torch.ones_like(batch_mean)
-        elif update_stats:
-            self._ucb_counts = self._ucb_counts + 1
-            self._ucb_mean = self._ucb_mean + (batch_mean - self._ucb_mean) / self._ucb_counts
-            self._step_count += 1
-        assert self._ucb_mean is not None and self._ucb_counts is not None
+        with self._state_lock:
+            if self._ucb_mean is None or self._ucb_counts is None:
+                self._ucb_mean = batch_mean.clone()
+                self._ucb_counts = torch.ones_like(batch_mean)
+            elif update_stats:
+                self._ucb_counts = self._ucb_counts + 1
+                self._ucb_mean = self._ucb_mean + (batch_mean - self._ucb_mean) / self._ucb_counts
+                self._step_count += 1
+            ucb_mean_snapshot = self._ucb_mean.clone()
+            ucb_counts_snapshot = self._ucb_counts.clone()
+        assert ucb_mean_snapshot is not None and ucb_counts_snapshot is not None
         ucb_bonus = (
-            self._ucb_mean.to(self.device)
+            ucb_mean_snapshot.to(self.device)
             + self.config.workspace.ucb_beta
             * torch.sqrt(
                 torch.log1p(torch.tensor(float(self._step_count), device=self.device))
-                / self._ucb_counts.to(self.device)
+                / ucb_counts_snapshot.to(self.device)
             )
         )
         ucb = ucb_bonus.unsqueeze(0).expand(slot_values.size(0), -1)
@@ -516,7 +532,8 @@ class Agent:
             state_tensor = None
 
         if state_tensor is not None:
-            self._latest_self_state = state_tensor.detach()
+            with self._state_lock:
+                self._latest_self_state = state_tensor.detach()
 
         competence_breakdown: dict[str, torch.Tensor] | None = None
         epistemic_novelty: torch.Tensor | None = None
@@ -570,14 +587,15 @@ class Agent:
                         action = action_dist.rsample()
                         entropy_value = float(base_entropy.mean().item())
 
-                    if not hasattr(self, "_real_entropy_history"):
-                        self._real_entropy_history = deque(maxlen=100)
-                    recent_window = self._real_entropy_history
-                    recent_window.append(entropy_value)
-                    if len(recent_window) == recent_window.maxlen:
-                        avg_entropy = sum(recent_window) / len(recent_window)
-                        if self._step_count % 100 == 0:
-                            print(f"[Real Policy Entropy] Mean: {avg_entropy:.3f}")
+                    with self._state_lock:
+                        if not hasattr(self, "_real_entropy_history"):
+                            self._real_entropy_history = deque(maxlen=100)
+                        recent_window = self._real_entropy_history
+                        recent_window.append(entropy_value)
+                        if len(recent_window) == recent_window.maxlen:
+                            avg_entropy = sum(recent_window) / len(recent_window)
+                            if self._step_count % 100 == 0:
+                                print(f"[Real Policy Entropy] Mean: {avg_entropy:.3f}")
                     current_real_entropy = entropy_value
 
                     (
