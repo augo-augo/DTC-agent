@@ -153,7 +153,6 @@ class StepResult:
     """Data container returned from ``Agent.act`` / ``TrainingLoop.step``."""
 
     action: torch.Tensor
-    action_index: torch.Tensor | None = None
     intrinsic_reward: torch.Tensor
     novelty: torch.Tensor
     observation_entropy: torch.Tensor
@@ -166,6 +165,7 @@ class StepResult:
     epistemic_novelty: torch.Tensor | None = None
     real_action_entropy: float | None = None
     self_state: torch.Tensor | None = None
+    action_index: torch.Tensor | None = None
 
 
 @dataclass
