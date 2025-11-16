@@ -264,6 +264,8 @@ class Agent:
         # Clear CUDA cache before initializing models to maximize available memory
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+            # Print initial memory stats
+            print(f"[Memory] Initial GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated, {torch.cuda.memory_reserved() / 1024**3:.2f} GB reserved")
 
         wm_config = WorldModelConfig(
             encoder=config.encoder,
@@ -271,7 +273,12 @@ class Agent:
             dynamics=config.dynamics,
             ensemble_size=config.world_model_ensemble,
         )
+        # WorldModelEnsemble.to() now handles sequential loading with cache clearing
         world_model = WorldModelEnsemble(wm_config).to(self.device)
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            print(f"[Memory] After WorldModel: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated, {torch.cuda.memory_reserved() / 1024**3:.2f} GB reserved")
+
         if self.device.type == "cuda" and config.compile_modules:
             self.world_model = _maybe_compile(world_model)
         else:
@@ -288,6 +295,9 @@ class Agent:
             + slot_dim * config.workspace.broadcast_slots
             + config.episodic_memory.key_dim
         )
+
+        # Load actor network
+        print(f"[Memory] Loading actor network...")
         actor_net = ActorNetwork(
             ActorConfig(
                 latent_dim=policy_feature_dim,
@@ -297,6 +307,12 @@ class Agent:
                 dropout=config.actor.dropout,
             )
         ).to(self.device)
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            print(f"[Memory] After Actor: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated")
+
+        # Load critic network
+        print(f"[Memory] Loading critic network...")
         critic_net = CriticNetwork(
             CriticConfig(
                 latent_dim=policy_feature_dim,
@@ -305,6 +321,9 @@ class Agent:
                 dropout=config.critic.dropout,
             )
         ).to(self.device)
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            print(f"[Memory] After Critic: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated, {torch.cuda.memory_reserved() / 1024**3:.2f} GB reserved")
         if self.device.type == "cuda" and config.compile_modules:
             self.actor = _maybe_compile(actor_net)
             self.critic = _maybe_compile(critic_net)
