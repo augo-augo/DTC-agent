@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 from dataclasses import dataclass
 from typing import Iterable, List
 
@@ -59,6 +60,53 @@ class WorldModelEnsemble(nn.Module):
             self.dynamics_models.append(model)
 
         torch.manual_seed(42)
+
+    def to(self, *args, **kwargs):
+        """Override to() to load components sequentially and clear cache between moves."""
+        # Get the target device from args or kwargs
+        device = None
+        if args:
+            if isinstance(args[0], torch.device):
+                device = args[0]
+            elif isinstance(args[0], str):
+                device = torch.device(args[0])
+        if device is None and 'device' in kwargs:
+            device = kwargs['device']
+            if isinstance(device, str):
+                device = torch.device(device)
+
+        # If target is not CUDA or device is None, use default behavior
+        if device is None or device.type != 'cuda':
+            return super().to(*args, **kwargs)
+
+        # Sequential loading with cache clearing for CUDA
+        print(f"[Memory Optimization] Loading WorldModelEnsemble to {device} sequentially...")
+
+        # Move encoder first
+        print(f"  - Moving encoder to {device}")
+        self.encoder = self.encoder.to(*args, **kwargs)
+        torch.cuda.empty_cache()
+
+        # Move decoder
+        print(f"  - Moving decoder to {device}")
+        self.decoder = self.decoder.to(*args, **kwargs)
+        torch.cuda.empty_cache()
+
+        # Move dynamics models one at a time
+        for i, model in enumerate(self.dynamics_models):
+            print(f"  - Moving dynamics model {i+1}/{len(self.dynamics_models)} to {device}")
+            self.dynamics_models[i] = model.to(*args, **kwargs)
+            torch.cuda.empty_cache()
+
+        # frozen_decoder stays on CPU
+        self.frozen_decoder = self.frozen_decoder.cpu()
+
+        # Final cleanup
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        print(f"[Memory Optimization] WorldModelEnsemble loaded successfully")
+        return self
 
     @torch.no_grad()
     def refresh_frozen_decoder(self) -> None:
