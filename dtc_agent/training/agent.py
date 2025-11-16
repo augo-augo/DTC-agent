@@ -186,10 +186,25 @@ class RewardNormalizer:
         self.device = device
 
     def __call__(self, reward: torch.Tensor) -> torch.Tensor:
-        self.running_stats.update(reward)
-        std = torch.sqrt(self.running_stats.var.clamp(min=1e-6))
-        normalized = (reward - self.running_stats.mean) / std
-        return normalized.clamp(-5.0, 5.0)
+        if reward.numel() == 0:
+            return reward
+
+        reward = sanitize_tensor(reward, replacement=0.0)
+        reward_fp32 = reward.detach().to(self.device, dtype=torch.float32)
+
+        if torch.isfinite(reward_fp32).all():
+            self.running_stats.update(reward_fp32)
+
+        mean = sanitize_tensor(self.running_stats.mean, replacement=0.0)
+        var = sanitize_tensor(self.running_stats.var, replacement=1.0)
+        var = torch.clamp(var, min=self.running_stats.epsilon, max=1e6)
+
+        denom = torch.sqrt(var + self.running_stats.epsilon)
+        normalized = (reward_fp32 - mean) / denom
+        normalized = sanitize_tensor(normalized, replacement=0.0)
+        normalized = torch.clamp(normalized, -5.0, 5.0)
+
+        return normalized.to(dtype=reward.dtype)
 
 
 @dataclass

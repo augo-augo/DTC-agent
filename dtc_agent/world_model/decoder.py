@@ -155,8 +155,8 @@ class SharedDecoder(nn.Module):
                 )
             mean = self.output_activation(mean)
 
-            log_std_clamped = torch.clamp(self.log_std, min=-2.0, max=1.0)
-            std = torch.exp(log_std_clamped).clamp(min=0.05, max=2.5)
+            log_std_clamped = torch.clamp(self.log_std, min=-5.0, max=0.5)
+            std = torch.exp(log_std_clamped).clamp(min=1e-4, max=2.0)
 
         mean = mean.to(dtype=torch.float32)
         std = std.to(dtype=torch.float32)
