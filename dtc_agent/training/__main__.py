@@ -10,6 +10,11 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
 os.environ["KMP_BLOCKTIME"] = "0"
 
+# Configure PyTorch CUDA memory allocator for better memory efficiency
+# This helps reduce fragmentation and improves memory allocation for large models
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
+
 import argparse
 import threading
 import time

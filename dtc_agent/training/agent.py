@@ -261,11 +261,22 @@ class Agent:
         self.progress_momentum = config.workspace.progress_momentum
         self.action_cost_scale = config.workspace.action_cost_scale
 
-        # Clear CUDA cache before initializing models to maximize available memory
+        # Aggressive CUDA cache clearing before initializing models
         if self.device.type == "cuda":
+            import gc
+            # Multiple rounds of cleanup to ensure fresh start
             torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Reset peak memory stats for monitoring
+            torch.cuda.reset_peak_memory_stats()
             # Print initial memory stats
-            print(f"[Memory] Initial GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated, {torch.cuda.memory_reserved() / 1024**3:.2f} GB reserved")
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"[Memory] Initial GPU memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+            print(f"[Memory] GPU device: {torch.cuda.get_device_name()}")
+            print(f"[Memory] Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f}GB")
 
         wm_config = WorldModelConfig(
             encoder=config.encoder,

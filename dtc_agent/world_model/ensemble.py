@@ -79,33 +79,82 @@ class WorldModelEnsemble(nn.Module):
         if device is None or device.type != 'cuda':
             return super().to(*args, **kwargs)
 
-        # Sequential loading with cache clearing for CUDA
+        # Sequential loading with aggressive cache clearing for CUDA
         print(f"[Memory Optimization] Loading WorldModelEnsemble to {device} sequentially...")
 
-        # Move encoder first
+        # Aggressive pre-loading cleanup
+        print(f"  - Clearing CUDA cache before loading...")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            # Print memory stats before loading
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"  - CUDA memory before loading: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+
+        # Move encoder components one at a time for better memory management
         print(f"  - Moving encoder to {device}")
-        self.encoder = self.encoder.to(*args, **kwargs)
+        print(f"    - Moving encoder.backbone...")
+        self.encoder.backbone = self.encoder.backbone.to(*args, **kwargs)
         torch.cuda.empty_cache()
+
+        print(f"    - Moving encoder.positional...")
+        self.encoder.positional = self.encoder.positional.to(*args, **kwargs)
+        torch.cuda.empty_cache()
+
+        print(f"    - Moving encoder.pre_slots...")
+        self.encoder.pre_slots = self.encoder.pre_slots.to(*args, **kwargs)
+        torch.cuda.empty_cache()
+
+        print(f"    - Moving encoder.slot_attention...")
+        self.encoder.slot_attention = self.encoder.slot_attention.to(*args, **kwargs)
+        torch.cuda.empty_cache()
+
+        print(f"    - Moving encoder.self_state...")
+        self.encoder.self_state = self.encoder.self_state.to(*args, **kwargs)
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            print(f"  - After encoder: {allocated:.2f}GB allocated")
 
         # Move decoder
         print(f"  - Moving decoder to {device}")
         self.decoder = self.decoder.to(*args, **kwargs)
         torch.cuda.empty_cache()
+        gc.collect()
+
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            print(f"  - After decoder: {allocated:.2f}GB allocated")
 
         # Move dynamics models one at a time
         for i, model in enumerate(self.dynamics_models):
             print(f"  - Moving dynamics model {i+1}/{len(self.dynamics_models)} to {device}")
             self.dynamics_models[i] = model.to(*args, **kwargs)
             torch.cuda.empty_cache()
+            if i % 2 == 1:  # Extra cleanup every 2 models
+                gc.collect()
+                torch.cuda.empty_cache()
 
         # frozen_decoder stays on CPU
         self.frozen_decoder = self.frozen_decoder.cpu()
 
-        # Final cleanup
-        torch.cuda.empty_cache()
+        # Final aggressive cleanup
         gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
-        print(f"[Memory Optimization] WorldModelEnsemble loaded successfully")
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"[Memory Optimization] WorldModelEnsemble loaded successfully")
+            print(f"  - Final CUDA memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+
         return self
 
     @torch.no_grad()
