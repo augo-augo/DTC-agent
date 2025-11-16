@@ -438,8 +438,8 @@ class Agent:
         elif update_stats:
             self._ucb_counts = self._ucb_counts + 1
             self._ucb_mean = self._ucb_mean + (batch_mean - self._ucb_mean) / self._ucb_counts
+            self._step_count += 1
         assert self._ucb_mean is not None and self._ucb_counts is not None
-        self._step_count += 1
         ucb_bonus = (
             self._ucb_mean.to(self.device)
             + self.config.workspace.ucb_beta
