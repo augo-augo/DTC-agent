@@ -144,18 +144,20 @@ class _SlotAttention(nn.Module):
 
         with autocast_ctx:
             b, n, d = inputs.shape
-            working_inputs = self.norm_inputs(inputs.float()).contiguous()
+            working_inputs = self.norm_inputs(inputs.float())
             mu = self.slot_mu.expand(b, self.num_slots, -1)
             sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
             slots = mu + sigma * torch.randn_like(mu)
 
-            k = self.project_k(working_inputs)
-            v = self.project_v(working_inputs)
+            flat_inputs = working_inputs.reshape(-1, d).contiguous()
+            k = self.project_k(flat_inputs).view(b, n, d).contiguous()
+            v = self.project_v(flat_inputs).view(b, n, d).contiguous()
 
             for _ in range(self.iters):
                 slots_prev = slots
-                normalized_slots = self.norm_slots(slots.float()).contiguous()
-                q = self.project_q(normalized_slots)
+                normalized_slots = self.norm_slots(slots.float())
+                flat_slots = normalized_slots.reshape(-1, d).contiguous()
+                q = self.project_q(flat_slots).view(b, self.num_slots, d).contiguous()
 
                 dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
                 dots = torch.clamp(dots, min=-20.0, max=20.0)
@@ -182,7 +184,8 @@ class _SlotAttention(nn.Module):
                     )
                 slots = slots.view(b, self.num_slots, d).contiguous()
                 normed_slots = self.norm_mlp(slots.float())
-                mlp_update = self.mlp(normed_slots)
+                flat_normed = normed_slots.reshape(-1, d).contiguous()
+                mlp_update = self.mlp(flat_normed).view(b, self.num_slots, d).contiguous()
                 slots = slots + mlp_update
 
         return slots.to(dtype=input_dtype)
