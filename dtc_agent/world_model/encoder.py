@@ -233,11 +233,26 @@ class SlotAttentionEncoder(nn.Module):
         """
         if observation.ndim != 4:
             raise ValueError("observation must be [batch, channels, height, width]")
-        features = self.backbone(observation)
-        batch, channels, height, width = features.shape
-        flat = features.view(batch, channels, height * width).permute(0, 2, 1)
-        flat = self.positional(flat)
-        flat = self.pre_slots(flat)
-        slots = self.slot_attention(flat)
-        z_self = self.self_state(features)
-        return {"z_self": z_self, "slots": slots}
+
+        input_dtype = observation.dtype
+        device_type = observation.device.type
+        autocast_fn = getattr(torch.amp, "autocast", None)
+        if autocast_fn is not None and device_type in ("cuda", "cpu"):
+            autocast_ctx = autocast_fn(device_type=device_type, enabled=False)
+        else:
+            autocast_ctx = nullcontext()
+
+        with autocast_ctx:
+            working_obs = observation.to(dtype=torch.float32)
+            features = self.backbone(working_obs)
+            batch, channels, height, width = features.shape
+            flat = features.view(batch, channels, height * width).permute(0, 2, 1)
+            flat = self.positional(flat)
+            flat = self.pre_slots(flat)
+            slots = self.slot_attention(flat)
+            z_self = self.self_state(features)
+
+        return {
+            "z_self": z_self.to(dtype=input_dtype),
+            "slots": slots.to(dtype=input_dtype),
+        }
