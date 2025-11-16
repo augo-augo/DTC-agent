@@ -328,7 +328,7 @@ class Agent:
         self.cognitive_wave_controller = CognitiveWaveController(
             config.cognitive_wave, self.device
         )
-        self._state_lock = threading.Lock()  # Protects shared state accessed by multiple threads
+        self._state_lock = threading.RLock()  # Protects shared state accessed by multiple threads
 
     @property
     def step_count(self) -> int:
