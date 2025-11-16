@@ -149,10 +149,10 @@ class _SlotAttention(nn.Module):
             q = self.project_q(slots)
 
             dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
-            dots = torch.clamp(dots, min=-10.0, max=10.0)
+            dots = torch.clamp(dots, min=-20.0, max=20.0)
 
             attn = dots.softmax(dim=-1) + self.epsilon
-            attn_sum = attn.sum(dim=-2, keepdim=True).clamp(min=1e-4)
+            attn_sum = attn.sum(dim=-2, keepdim=True).clamp(min=1e-6)
             attn = attn / attn_sum
 
             updates = torch.matmul(attn.transpose(1, 2), v)

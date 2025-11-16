@@ -103,7 +103,7 @@ class InfoNCEEmpowermentEstimator(nn.Module):
         embedded_action = sanitize_tensor(embedded_action, replacement=0.0)
         embedded_latent = sanitize_tensor(embedded_latent, replacement=0.0)
 
-        negatives = self._collect_negatives(latent)
+        negatives = self._collect_negatives(latent_float)
         negatives = sanitize_tensor(negatives, replacement=0.0)
 
         all_latents = torch.cat([embedded_latent.unsqueeze(1), negatives], dim=1)
@@ -121,7 +121,10 @@ class InfoNCEEmpowermentEstimator(nn.Module):
                     )
                 )
 
-        temperature = torch.clamp(self.temperature.detach(), min=0.05, max=5.0)
+        temperature = sanitize_tensor(
+            self.temperature.detach(), replacement=self.config.temperature
+        )
+        temperature = torch.clamp(temperature, min=0.01, max=10.0)
 
         logits = torch.einsum("bd,bnd->bn", embedded_action, all_latents) / temperature
         logits = sanitize_tensor(logits, replacement=0.0)

@@ -4,7 +4,6 @@ import math
 from typing import Iterable
 
 import torch
-import torch.nn.functional as F
 
 
 def safe_log(x: torch.Tensor, eps: float = 1e-8, clamp_min: float = -10.0) -> torch.Tensor:
@@ -147,78 +146,6 @@ def estimate_observation_entropy_stable(
     return torch.clamp(entropy, min=0.0, max=max_entropy)
 
 
-def forward_empowerment_stable(self, action: torch.Tensor, latent: torch.Tensor) -> torch.Tensor:
-    """Stable InfoNCE computation with defensive checks.
-
-    Args:
-        self: Empowerment estimator instance.
-        action: Batch of actions supplied to the estimator.
-        latent: Corresponding latent states.
-
-    Returns:
-        Tensor containing bounded empowerment estimates.
-    """
-    action = sanitize_tensor(action, replacement=0.0)
-    latent = sanitize_tensor(latent, replacement=0.0)
-
-    embedded_action = self.action_proj(action)
-    embedded_latent = self.latent_proj(latent)
-
-    embedded_action = sanitize_tensor(embedded_action, replacement=0.0)
-    embedded_latent = sanitize_tensor(embedded_latent, replacement=0.0)
-
-    negatives = self._collect_negatives(latent)
-    negatives = sanitize_tensor(negatives, replacement=0.0)
-
-    all_latents = torch.cat([embedded_latent.unsqueeze(1), negatives], dim=1)
-
-    temperature = torch.clamp(self.temperature, min=0.01, max=10.0)
-    logits = torch.einsum("bd,bnd->bn", embedded_action, all_latents) / temperature
-    logits = sanitize_tensor(logits, replacement=0.0)
-    logits = torch.clamp(logits, min=-20.0, max=20.0)
-
-    labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
-
-    loss = F.cross_entropy(logits, labels, reduction="none", label_smoothing=0.01)
-    loss = sanitize_tensor(loss, replacement=0.0)
-
-    self._enqueue_latents(latent.detach())
-
-    return -torch.clamp(loss, min=-10.0, max=10.0)
-
-
-def reward_normalizer_call_stable(self, reward: torch.Tensor) -> torch.Tensor:
-    """Normalize rewards while aggressively sanitizing NaN/Inf values.
-
-    Args:
-        self: Reward normalizer instance.
-        reward: Reward tensor to normalize.
-
-    Returns:
-        Tensor of normalized rewards constrained to the configured range.
-    """
-    if reward.numel() == 0:
-        return reward
-
-    reward = sanitize_tensor(reward, replacement=0.0)
-    reward_fp32 = reward.float()
-
-    if torch.isfinite(reward_fp32).all():
-        self.stats.update(reward_fp32)
-
-    mean = sanitize_tensor(self.stats.mean, replacement=0.0)
-    var = sanitize_tensor(self.stats.var, replacement=1.0)
-    var = torch.clamp(var, min=self.eps, max=1e6)
-
-    denom = torch.sqrt(var + self.eps)
-    normalized = (reward_fp32 - mean) / denom
-
-    normalized = sanitize_tensor(normalized, replacement=0.0)
-    normalized = torch.clamp(normalized, -self.clamp_value, self.clamp_value)
-
-    return normalized.to(dtype=reward.dtype)
-
-
 def sanitize_gradients(model: torch.nn.Module, max_norm: float = 5.0) -> int:
     """Replace non-finite gradients with zeros and report replacements.
 
@@ -240,86 +167,6 @@ def sanitize_gradients(model: torch.nn.Module, max_norm: float = 5.0) -> int:
         bad_count += grad.numel() - int(finite_mask.sum().item())
         param.grad = torch.where(finite_mask, grad, torch.zeros_like(grad))
     return bad_count
-
-
-def decoder_forward_stable(self, latent_slots: torch.Tensor) -> torch.distributions.Distribution:
-    """Stable ``SharedDecoder.forward`` implementation with bounded variance.
-
-    Args:
-        self: Decoder instance whose ``forward`` is being stabilized.
-        latent_slots: Latent slot tensor ``[batch, slot_dim]``.
-
-    Returns:
-        ``Independent`` Normal distribution over reconstructed observations.
-
-    Raises:
-        ValueError: If ``latent_slots`` has incorrect dimensionality or slot size.
-    """
-    if latent_slots.ndim != 2:
-        raise ValueError("latent_slots must have shape [batch, slot_dim]")
-    batch, slot_dim = latent_slots.shape
-    if slot_dim != self.config.slot_dim:
-        raise ValueError("slot_dim mismatch with decoder configuration")
-
-    init_h, init_w = self.config.initial_spatial
-    hidden = self.activation(self.fc(latent_slots))
-    hidden = hidden.view(batch, self.config.hidden_channels[0], init_h, init_w)
-    mean = self.deconv(hidden)
-
-    _, target_h, target_w = self.config.observation_shape
-    if mean.shape[-2:] != (target_h, target_w):
-        mean = F.interpolate(mean, size=(target_h, target_w), mode="bilinear", align_corners=False)
-    mean = self.output_activation(mean)
-
-    log_std_clamped = torch.clamp(self.log_std, min=-5.0, max=0.5)
-    std = torch.exp(log_std_clamped).clamp(min=1e-4, max=2.0)
-
-    return torch.distributions.Independent(
-        torch.distributions.Normal(mean, std),
-        len(self.config.observation_shape),
-    )
-
-
-def slot_attention_forward_stable(self, inputs: torch.Tensor) -> torch.Tensor:
-    """Slot Attention forward pass with protected attention normalization.
-
-    Args:
-        self: Slot Attention module instance.
-        inputs: Tensor of shape ``[batch, num_tokens, dim]``.
-
-    Returns:
-        Tensor of slot embeddings produced after stabilized attention updates.
-    """
-    b, n, d = inputs.shape
-    inputs = self.norm_inputs(inputs)
-    mu = self.slot_mu.expand(b, self.num_slots, -1)
-    sigma = F.softplus(self.slot_sigma)
-    slots = mu + sigma * torch.randn_like(mu)
-
-    k = self.project_k(inputs)
-    v = self.project_v(inputs)
-
-    for _ in range(self.iters):
-        slots_prev = slots
-        slots = self.norm_slots(slots)
-        q = self.project_q(slots)
-
-        dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
-        dots = torch.clamp(dots, min=-20.0, max=20.0)
-
-        attn = dots.softmax(dim=-1) + self.epsilon
-        attn_sum = attn.sum(dim=-2, keepdim=True).clamp(min=1e-6)
-        attn = attn / attn_sum
-
-        updates = torch.matmul(attn.transpose(1, 2), v)
-        slots = self.gru(
-            updates.reshape(-1, d),
-            slots_prev.reshape(-1, d),
-        )
-        slots = slots.view(b, self.num_slots, d)
-        slots = slots + self.mlp(self.norm_mlp(slots))
-
-    return slots
 
 
 def optimize_with_loss_check() -> None:  # pragma: no cover - helper inserted inline
