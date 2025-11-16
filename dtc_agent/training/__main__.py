@@ -115,6 +115,91 @@ def _compute_self_state(
     return torch.tensor(selected, dtype=torch.float32)
 
 
+def _summarize_self_state(state_values: List[float]) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    names = ["health_norm", "food_norm", "energy_step", "is_sleeping"]
+    for index, value in enumerate(state_values):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        name = names[index] if index < len(names) else f"feature_{index}"
+        metrics[f"self_state/{name}"] = numeric
+    return metrics
+
+
+def _crafter_info_metrics(info: dict | None) -> tuple[Dict[str, float], int]:
+    if not isinstance(info, dict):
+        return {}, 0
+
+    merged_info: Dict[str, float] = {}
+    merged_stats: Dict[str, float] = {}
+    achievements_union: Dict[str, float] = {}
+    inventory_max: Dict[str, float] = {}
+
+    for key, value in info.items():
+        if key in {"stats", "achievements", "inventory"}:
+            continue
+        if isinstance(value, (int, float, bool)):
+            merged_info[key] = float(value)
+
+    stats = info.get("stats")
+    if isinstance(stats, dict):
+        for key, value in stats.items():
+            if isinstance(value, (int, float, bool)):
+                merged_stats[key] = float(value)
+
+    achievements = info.get("achievements")
+    if isinstance(achievements, dict):
+        for key, value in achievements.items():
+            if isinstance(value, (int, float, bool)):
+                achievements_union[key] = max(achievements_union.get(key, 0.0), float(value))
+
+    inventory = info.get("inventory")
+    if isinstance(inventory, dict):
+        for key, value in inventory.items():
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            inventory_max[key] = max(inventory_max.get(key, 0.0), numeric)
+
+    def _lookup(key: str) -> float | None:
+        if key in merged_info:
+            return merged_info[key]
+        if key in merged_stats:
+            return merged_stats[key]
+        return None
+
+    metrics: Dict[str, float] = {}
+    stat_mappings = {
+        "health": "health",
+        "food": "food",
+        "drink": "drink",
+        "energy": "energy",
+        "sleep": "is_sleeping",
+        "sleeping": "is_sleeping",
+    }
+    for source_key, target_name in stat_mappings.items():
+        value = _lookup(source_key)
+        if value is not None:
+            metrics[f"crafter_stats/{target_name}"] = value
+
+    achievements_count = 0
+    if achievements_union:
+        unlocked = sum(1.0 for value in achievements_union.values() if value >= 1.0)
+        achievements_count = int(unlocked)
+        metrics["crafter_stats/achievements_unlocked"] = unlocked
+        for name, value in achievements_union.items():
+            metrics[f"crafter_achievements/{name}"] = float(value)
+
+    if inventory_max:
+        for name, value in inventory_max.items():
+            metrics[f"crafter_inventory/{name}"] = value
+
+    return metrics, achievements_count
+
+
 def _select_env_action(action_tensor: torch.Tensor, action_space_n: int) -> int:
     if action_tensor.ndim != 2:
         raise ValueError("Expected batched action tensor from TrainingLoop.step")
@@ -250,8 +335,22 @@ def _actor_loop(
                 else 0.0
             )
             should_log = log_interval > 0 and step_index % log_interval == 0
-            achievements = info_dict.get("achievements") if isinstance(info_dict, dict) else None
-            achievements_count = len(achievements) if isinstance(achievements, dict) else 0
+            info_metrics, achievements_count = _crafter_info_metrics(info_dict)
+            state_metrics = _summarize_self_state(self_state_list)
+            step_metrics = {
+                "step/intrinsic_reward": float(policy_result.intrinsic_reward.mean().item()),
+                "step/avg_slot_novelty": float(policy_result.novelty.mean().item()),
+                "step/observation_entropy": float(policy_result.observation_entropy.mean().item()),
+                "step/env_reward": float(env_reward),
+                "step/epistemic_novelty": epistemic_value,
+                "debug/competence_progress": competence_progress,
+                "debug/competence_penalty": competence_penalty,
+                "debug/competence_ema_prev": competence_ema_prev,
+                "debug/competence_ema_current": competence_ema_current,
+                "debug/actor_real_entropy": real_entropy_value,
+            }
+            step_metrics.update(info_metrics)
+            step_metrics.update(state_metrics)
             metrics_queue.put(
                 {
                     "kind": "step",
@@ -259,23 +358,12 @@ def _actor_loop(
                     "step": step_index,
                     "episode": episode_id,
                     "episode_steps": next_episode_steps,
-                    "intrinsic": float(policy_result.intrinsic_reward.mean().item()),
-                    "novelty": float(policy_result.novelty.mean().item()),
-                    "entropy": float(policy_result.observation_entropy.mean().item()),
-                    "env_reward": float(env_reward),
+                    "metrics": step_metrics,
                     "reward_components": reward_components,
                     "raw_reward_components": raw_components,
-                    "self_state": self_state_list,
-                    "info": info_dict,
                     "log": should_log,
                     "done": terminated or truncated or reached_limit,
                     "achievements_count": achievements_count,
-                    "epistemic_novelty": epistemic_value,
-                    "competence_progress": competence_progress,
-                    "competence_penalty": competence_penalty,
-                    "competence_ema_prev": competence_ema_prev,
-                    "competence_ema_current": competence_ema_current,
-                    "real_action_entropy": real_entropy_value,
                 }
             )
             done = terminated or truncated or reached_limit

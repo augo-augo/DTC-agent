@@ -441,23 +441,25 @@ class WandBLogger:
             "step/episode_steps": float(primary.get("episode_steps", 0)),
         }
 
-        scalar_map = {
-            "intrinsic": "step/intrinsic_reward",
-            "novelty": "step/avg_slot_novelty",
-            "entropy": "step/observation_entropy",
-            "env_reward": "step/env_reward",
-            "epistemic_novelty": "step/epistemic_novelty",
-            "competence_progress": "debug/competence_progress",
-            "competence_penalty": "debug/competence_penalty",
-            "competence_ema_prev": "debug/competence_ema_prev",
-            "competence_ema_current": "debug/competence_ema_current",
-            "real_action_entropy": "debug/actor_real_entropy",
-        }
+        scalar_totals: Dict[str, float] = {}
+        scalar_counts: Dict[str, int] = {}
 
-        for source_key, target_key in scalar_map.items():
-            values = [msg.get(source_key) for msg in messages if isinstance(msg.get(source_key), (int, float))]
-            if values:
-                metrics[target_key] = float(sum(values) / len(values))
+        for message in messages:
+            scalars = message.get("metrics")
+            if not isinstance(scalars, dict):
+                continue
+            for key, value in scalars.items():
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                scalar_totals[key] = scalar_totals.get(key, 0.0) + numeric
+                scalar_counts[key] = scalar_counts.get(key, 0) + 1
+
+        for key, total in scalar_totals.items():
+            count = scalar_counts.get(key, 0)
+            if count:
+                metrics[key] = total / count
 
         reward_components = self._aggregate_components(messages, "reward_components")
         raw_reward_components = self._aggregate_components(messages, "raw_reward_components")
@@ -474,78 +476,6 @@ class WandBLogger:
             raw_explore_value = raw_reward_components.get("explore", explore_value)
             metrics["step/reward_explore"] = max(explore_value, 0.0)
             metrics["step/reward_explore_raw"] = raw_explore_value
-
-        self_states = [msg.get("self_state") for msg in messages if isinstance(msg.get("self_state"), list)]
-        if self_states:
-            averaged_state = self._average_lists(self_states)
-            state_names = ["health_norm", "food_norm", "energy_step", "is_sleeping"]
-            for index, value in enumerate(averaged_state):
-                name = state_names[index] if index < len(state_names) else f"feature_{index}"
-                metrics[f"self_state/{name}"] = float(value)
-
-        info_dicts = [
-            message.get("info") for message in messages if isinstance(message.get("info"), dict)
-        ]
-
-        merged_info: Dict[str, float] = {}
-        merged_stats: Dict[str, float] = {}
-        achievements_union: Dict[str, float] = {}
-        inventory_max: Dict[str, float] = {}
-
-        for info in info_dicts:
-            for key, value in info.items():
-                if key in {"stats", "achievements", "inventory"}:
-                    continue
-                if isinstance(value, (int, float, bool)):
-                    merged_info[key] = float(value)
-            stats = info.get("stats")
-            if isinstance(stats, dict):
-                for key, value in stats.items():
-                    if isinstance(value, (int, float, bool)):
-                        merged_stats[key] = float(value)
-            achievements = info.get("achievements")
-            if isinstance(achievements, dict):
-                for key, value in achievements.items():
-                    if isinstance(value, (int, float, bool)):
-                        achievements_union[key] = max(achievements_union.get(key, 0.0), float(value))
-            inventory = info.get("inventory")
-            if isinstance(inventory, dict):
-                for key, value in inventory.items():
-                    try:
-                        numeric = float(value)
-                    except (TypeError, ValueError):
-                        continue
-                    inventory_max[key] = max(inventory_max.get(key, 0.0), numeric)
-
-        def _info_lookup(key: str) -> float | None:
-            if key in merged_info:
-                return merged_info[key]
-            if key in merged_stats:
-                return merged_stats[key]
-            return None
-
-        stat_mappings = {
-            "health": "health",
-            "food": "food",
-            "drink": "drink",
-            "energy": "energy",
-            "sleep": "is_sleeping",
-            "sleeping": "is_sleeping",
-        }
-        for source_key, target_name in stat_mappings.items():
-            value = _info_lookup(source_key)
-            if value is not None:
-                metrics[f"crafter_stats/{target_name}"] = value
-
-        if achievements_union:
-            unlocked = sum(1.0 for value in achievements_union.values() if value >= 1.0)
-            metrics["crafter_stats/achievements_unlocked"] = unlocked
-            for name, value in achievements_union.items():
-                metrics[f"crafter_achievements/{name}"] = float(value)
-
-        if inventory_max:
-            for name, value in inventory_max.items():
-                metrics[f"crafter_inventory/{name}"] = value
 
         return metrics
 
@@ -566,24 +496,6 @@ class WandBLogger:
                 counts[name] = counts.get(name, 0) + 1
 
         return {name: totals[name] / counts[name] for name in totals if counts.get(name)}
-
-    def _average_lists(self, values: List[List[float]]) -> List[float]:
-        if not values:
-            return []
-
-        max_len = max(len(item) for item in values)
-        sums = [0.0] * max_len
-        counts = [0] * max_len
-
-        for item in values:
-            for index, value in enumerate(item):
-                try:
-                    sums[index] += float(value)
-                    counts[index] += 1
-                except (TypeError, ValueError):
-                    continue
-
-        return [sums[i] / counts[i] if counts[i] else 0.0 for i in range(max_len)]
 
     def _monitor_queue_locked(self, queue_size: int) -> None:
         now = time.time()
