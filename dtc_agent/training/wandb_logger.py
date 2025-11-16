@@ -3,7 +3,6 @@ from __future__ import annotations
 import threading
 import time
 import os
-import sys
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
@@ -12,6 +11,8 @@ from typing import Dict, List, MutableMapping
 
 import numpy as np
 import wandb
+
+from dtc_agent.utils.logging import _emit_console_info, _emit_console_warning
 
 
 class WandBLogger:
@@ -282,7 +283,7 @@ class WandBLogger:
                     self._last_worker_warning = 0.0
             except TimeoutError:
                 description = self._describe_job(func, args, kwargs)
-                self._emit_console_warning(
+                _emit_console_warning(
                     f"[W&B] Logging job '{description}' exceeded "
                     f"{self._log_timeout:.1f}s; continuing without waiting."
                 )
@@ -292,7 +293,7 @@ class WandBLogger:
                     self._last_worker_warning = time.time()
             except Exception as exc:  # pragma: no cover - defensive logging
                 description = self._describe_job(func, args, kwargs)
-                self._emit_console_warning(f"[W&B] Logging job '{description}' failed: {exc}")
+                _emit_console_warning(f"[W&B] Logging job '{description}' failed: {exc}")
                 with self.lock:
                     self._last_worker_heartbeat = time.time()
                     self._last_worker_warning = 0.0
@@ -380,7 +381,7 @@ class WandBLogger:
                 video_payload = wandb.Video(frames, fps=8, format="mp4", caption=caption)
             wandb.log({label: video_payload}, step=step)
         except Exception as exc:  # pragma: no cover - defensive logging
-            self._emit_console_warning(f"[W&B] Failed to log video at step {step}: {exc}")
+            _emit_console_warning(f"[W&B] Failed to log video at step {step}: {exc}")
         else:
             self._last_wandb_publish_step = step
 
@@ -546,14 +547,14 @@ class WandBLogger:
         try:
             text = json.dumps(record, ensure_ascii=False)
         except Exception as exc:
-            self._emit_console_warning(f"[LocalLog] Failed to serialize metrics: {exc}")
+            _emit_console_warning(f"[LocalLog] Failed to serialize metrics: {exc}")
             return
         with self._local_file_lock:
             try:
                 with self._metrics_file_path.open("a", encoding="utf-8") as handle:
                     handle.write(text + "\n")
             except Exception as exc:
-                self._emit_console_warning(f"[LocalLog] Failed to write metrics: {exc}")
+                _emit_console_warning(f"[LocalLog] Failed to write metrics: {exc}")
 
     def _record_video_metadata(self, metadata: Dict) -> None:
         if self._video_metadata_path is None:
@@ -561,14 +562,14 @@ class WandBLogger:
         try:
             text = json.dumps(metadata, ensure_ascii=False)
         except Exception as exc:
-            self._emit_console_warning(f"[LocalLog] Failed to serialize video metadata: {exc}")
+            _emit_console_warning(f"[LocalLog] Failed to serialize video metadata: {exc}")
             return
         with self._local_file_lock:
             try:
                 with self._video_metadata_path.open("a", encoding="utf-8") as handle:
                     handle.write(text + "\n")
             except Exception as exc:
-                self._emit_console_warning(f"[LocalLog] Failed to write video metadata: {exc}")
+                _emit_console_warning(f"[LocalLog] Failed to write video metadata: {exc}")
 
     def _save_video_locally(self, message: Dict, frames: np.ndarray) -> Path | None:
         if self._videos_dir is None:
@@ -581,7 +582,7 @@ class WandBLogger:
         try:
             import imageio.v2 as imageio  # type: ignore[import]
         except Exception as exc:
-            self._emit_console_warning(f"[LocalLog] imageio unavailable, skipping local video save: {exc}")
+            _emit_console_warning(f"[LocalLog] imageio unavailable, skipping local video save: {exc}")
             return
 
         data = np.asarray(frames)
@@ -593,7 +594,7 @@ class WandBLogger:
         try:
             imageio.mimwrite(target_path, data, fps=8, quality=8)
         except Exception as exc:
-            self._emit_console_warning(f"[LocalLog] Failed to save video {target_path.name}: {exc}")
+            _emit_console_warning(f"[LocalLog] Failed to save video {target_path.name}: {exc}")
             return None
 
         metadata = dict(message)
@@ -693,7 +694,7 @@ class WandBLogger:
             messages = self._post_lock_messages
             self._post_lock_messages = []
         for message in messages:
-            self._emit_console_warning(message)
+            _emit_console_warning(message)
 
     def _print_progress(self, step: int, metrics: Dict[str, float], worker_id: int | None) -> None:
         intrinsic = metrics.get("step/intrinsic_reward", 0.0)
@@ -701,7 +702,7 @@ class WandBLogger:
         entropy = metrics.get("step/observation_entropy", 0.0)
         loss_str = f"{self.latest_training_loss:.4f}" if self.latest_training_loss is not None else "n/a"
         worker_prefix = f"worker {worker_id} " if worker_id is not None else ""
-        self._emit_console_info(
+        _emit_console_info(
             f"[{worker_prefix}step {step:05d}] "
             f"intrinsic={intrinsic:.4f} "
             f"novelty={novelty:.4f} "
@@ -716,33 +717,14 @@ class WandBLogger:
         self._emit_post_lock_messages()
         pending_jobs = self._log_queue.qsize()
         if pending_jobs:
-            self._emit_console_warning(f"[W&B] Waiting for {pending_jobs} logging jobs during shutdown.")
+            _emit_console_warning(f"[W&B] Waiting for {pending_jobs} logging jobs during shutdown.")
         self._log_queue.put(None)
         self._log_queue.join()
         self._log_thread.join(timeout=5.0)
         if self._log_thread.is_alive():
-            self._emit_console_warning("[W&B] Logging worker did not shut down within 5s; forcing executor shutdown.")
+            _emit_console_warning("[W&B] Logging worker did not shut down within 5s; forcing executor shutdown.")
         try:
             self._log_executor.shutdown(wait=False, cancel_futures=True)
         except TypeError:
             self._log_executor.shutdown(wait=False)
 
-    def _emit_console_warning(self, message: str) -> None:
-        self._safe_console_write(message, stream=sys.stderr)
-
-    def _emit_console_info(self, message: str) -> None:
-        self._safe_console_write(message, stream=sys.stdout)
-
-    def _safe_console_write(self, message: str, stream) -> None:
-        data = (message + "\n").encode("utf-8", "replace")
-        fileno = getattr(stream, "fileno", None)
-        if callable(fileno):
-            try:
-                os.write(fileno(), data)
-                return
-            except OSError:
-                pass
-        try:
-            stream.write(message + "\n")
-        except Exception:
-            pass

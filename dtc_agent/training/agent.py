@@ -14,7 +14,7 @@ from dtc_agent.agents import ActorConfig, ActorNetwork, CriticConfig, CriticNetw
 from dtc_agent.cognition import WorkspaceRouter
 from dtc_agent.memory import EpisodicBuffer
 from dtc_agent.motivation import IntrinsicRewardGenerator, estimate_observation_entropy
-from dtc_agent.utils import sanitize_tensor
+from dtc_agent.utils import RewardNormalizer, RunningMeanStd, sanitize_tensor
 from dtc_agent.world_model import (
     DecoderConfig,
     DynamicsConfig,
@@ -144,67 +144,6 @@ def _configure_tf32_precision(device: torch.device) -> None:
         except AttributeError:
             pass
 
-
-class RunningMeanStd:
-    """Track running mean and variance for streaming tensors."""
-
-    def __init__(self, device: torch.device, epsilon: float = 1e-4) -> None:
-        self.device = device
-        self.epsilon = epsilon
-        self.mean = torch.zeros(1, device=device)
-        self.var = torch.ones(1, device=device)
-        self.count = torch.tensor(epsilon, device=device)
-
-    def update(self, x: torch.Tensor) -> None:
-        if x.numel() == 0:
-            return
-        values = x.detach().to(self.device, dtype=torch.float32).reshape(-1, 1)
-        batch_mean = values.mean(dim=0)
-        batch_var = values.var(dim=0, unbiased=False)
-        batch_count = values.shape[0]
-        self._update_from_moments(batch_mean, batch_var, batch_count)
-
-    def _update_from_moments(
-        self, batch_mean: torch.Tensor, batch_var: torch.Tensor, batch_count: float
-    ) -> None:
-        delta = batch_mean - self.mean
-        total_count = self.count + batch_count
-        new_mean = self.mean + delta * (batch_count / total_count)
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        m2 = m_a + m_b + delta.pow(2) * self.count * batch_count / total_count
-        self.mean = new_mean
-        self.var = m2 / total_count
-        self.count = total_count
-
-
-class RewardNormalizer:
-    """Normalize intrinsic reward streams to stabilize training."""
-
-    def __init__(self, device: torch.device, epsilon: float = 1e-4) -> None:
-        self.running_stats = RunningMeanStd(device=device, epsilon=epsilon)
-        self.device = device
-
-    def __call__(self, reward: torch.Tensor) -> torch.Tensor:
-        if reward.numel() == 0:
-            return reward
-
-        reward = sanitize_tensor(reward, replacement=0.0)
-        reward_fp32 = reward.detach().to(self.device, dtype=torch.float32)
-
-        if torch.isfinite(reward_fp32).all():
-            self.running_stats.update(reward_fp32)
-
-        mean = sanitize_tensor(self.running_stats.mean, replacement=0.0)
-        var = sanitize_tensor(self.running_stats.var, replacement=1.0)
-        var = torch.clamp(var, min=self.running_stats.epsilon, max=1e6)
-
-        denom = torch.sqrt(var + self.running_stats.epsilon)
-        normalized = (reward_fp32 - mean) / denom
-        normalized = sanitize_tensor(normalized, replacement=0.0)
-        normalized = torch.clamp(normalized, -5.0, 5.0)
-
-        return normalized.to(dtype=reward.dtype)
 
 
 @dataclass

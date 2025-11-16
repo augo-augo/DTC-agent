@@ -6,73 +6,13 @@ from typing import Callable, Sequence
 import torch
 
 from dtc_agent.motivation.metrics import AdaptiveNoveltyCalculator
+from dtc_agent.utils.statistics import RewardNormalizer
 
 
 NoveltyMetric = Callable[
     [Sequence[torch.Tensor], Sequence[torch.distributions.Distribution] | None],
     torch.Tensor,
 ]
-
-
-class _RewardScaler:
-    """Running mean/variance normalizer applied to individual intrinsic components."""
-
-    def __init__(self, clamp_value: float = 5.0, eps: float = 1e-6) -> None:
-        """Set up the normalizer state.
-
-        Args:
-            clamp_value: Symmetric magnitude limit applied to normalized values.
-            eps: Small constant added for numerical stability.
-        """
-
-        self.clamp_value = clamp_value
-        self.eps = eps
-        self.min_var = 0.1
-        self.mean: torch.Tensor | None = None
-        self.var: torch.Tensor | None = None
-        self.count: torch.Tensor | None = None
-
-    def __call__(self, value: torch.Tensor) -> torch.Tensor:
-        """Normalize a reward component using running statistics.
-
-        Args:
-            value: Reward component tensor to normalize.
-
-        Returns:
-            Tensor with stabilized mean and variance, clamped to
-            ``[-clamp_value, clamp_value]``.
-        """
-
-        if value.numel() == 0:
-            return value
-
-        # Short-circuit on non-finite inputs to avoid contaminating running stats.
-        if not torch.all(torch.isfinite(value.detach())):
-            return torch.zeros_like(value)
-
-        stats_value = value.detach().to(dtype=torch.float32)
-        if self.mean is None or self.mean.device != stats_value.device:
-            device = stats_value.device
-            self.mean = torch.zeros(1, device=device)
-            self.var = torch.ones(1, device=device)
-            self.count = torch.tensor(self.eps, device=device)
-        flat = stats_value.view(-1)
-        batch_mean = flat.mean()
-        batch_var = flat.var(unbiased=False)
-        batch_count = flat.numel()
-        with torch.no_grad():
-            delta = batch_mean - self.mean
-            total = self.count + batch_count
-            self.mean = self.mean + delta * (batch_count / total)
-            m_a = self.var * self.count
-            m_b = batch_var * batch_count
-            m2 = m_a + m_b + delta.pow(2) * self.count * batch_count / total
-            self.var = torch.clamp(m2 / total, min=self.min_var)
-            self.count = total
-        mean = self.mean.to(dtype=value.dtype)
-        var = self.var.to(dtype=value.dtype)
-        normalized = (value - mean) / torch.sqrt(var + self.eps)
-        return normalized.clamp(-self.clamp_value, self.clamp_value)
 
 
 @dataclass
@@ -132,12 +72,17 @@ class IntrinsicRewardGenerator:
         self.ema_slow = torch.tensor(0.0)
         self.alpha_slow = config.alpha_slow
         self._ema_initialized = False
+        normalizer_kwargs = dict(
+            clamp_value=config.component_clip,
+            epsilon=1e-6,
+            min_variance=0.1,
+        )
         self._scalers = {
-            "competence": _RewardScaler(clamp_value=config.component_clip),
-            "empowerment": _RewardScaler(clamp_value=config.component_clip),
-            "safety": _RewardScaler(clamp_value=config.component_clip),
-            "survival": _RewardScaler(clamp_value=config.component_clip),
-            "explore": _RewardScaler(clamp_value=config.component_clip),
+            "competence": RewardNormalizer(**normalizer_kwargs),
+            "empowerment": RewardNormalizer(**normalizer_kwargs),
+            "safety": RewardNormalizer(**normalizer_kwargs),
+            "survival": RewardNormalizer(**normalizer_kwargs),
+            "explore": RewardNormalizer(**normalizer_kwargs),
         }
 
     def get_novelty(
