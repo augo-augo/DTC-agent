@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from dtc_agent.motivation import (
     InfoNCEEmpowermentEstimator,
@@ -392,24 +393,31 @@ class Trainer:
                     current_latents["z_self"], broadcast, memory_context
                 )
                 action_dist = self.agent.call_with_fallback("actor", features)
-                sampled_action = action_dist.rsample()
-                dream_log_prob = action_dist.log_prob(sampled_action)
+                entropy_boost = wave_modifiers.get("dream_entropy_boost", 1.0)
+                sample_dist = action_dist
+                logits = getattr(action_dist, "logits", None)
+                if entropy_boost > 1.0 and logits is not None:
+                    temperature = max(1.0, float(entropy_boost))
+                    adjusted_logits = logits / temperature
+                    sample_dist = torch.distributions.Categorical(logits=adjusted_logits)
+                sampled_indices = sample_dist.sample()
+                dream_log_prob = action_dist.log_prob(sampled_indices)
                 dream_entropy = action_dist.entropy()
 
-                entropy_boost = wave_modifiers.get("dream_entropy_boost", 1.0)
-                base_noise_scale = 0.15
-                action_noise = torch.randn_like(sampled_action) * base_noise_scale
-                mutation_scale = 0.1 * (1.0 + entropy_boost)
-                policy_mutation = torch.randn_like(sampled_action) * mutation_scale
-                mutated_action = sampled_action + action_noise + policy_mutation
                 counterfactual_mask = (
-                    torch.rand(sampled_action.shape[0], device=sampled_action.device) < 0.1
+                    torch.rand(sampled_indices.shape, device=sampled_indices.device) < 0.1
                 )
-                wild_action = torch.randn_like(sampled_action) * 2.0
-                executed_action = torch.where(
-                    counterfactual_mask.unsqueeze(-1), wild_action, mutated_action
+                random_actions = torch.randint(
+                    0,
+                    self.config.dynamics.action_dim,
+                    sampled_indices.shape,
+                    device=sampled_indices.device,
                 )
-                executed_action = executed_action.clamp(-3.0, 3.0)
+                executed_indices = torch.where(counterfactual_mask, random_actions, sampled_indices)
+                executed_action = F.one_hot(
+                    executed_indices,
+                    num_classes=self.config.dynamics.action_dim,
+                ).to(device=features.device, dtype=features.dtype)
                 dream_actions.append(executed_action)
                 counterfactual_rates.append(counterfactual_mask.float().mean())
 

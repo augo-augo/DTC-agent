@@ -11,7 +11,7 @@ class ActorConfig:
 
     Attributes:
         latent_dim: Dimensionality of the concatenated feature input.
-        action_dim: Number of continuous action dimensions produced.
+        action_dim: Number of discrete actions available to the agent.
         hidden_dim: Width of the intermediate MLP layers.
         num_layers: Number of hidden layers in the shared backbone MLP.
         dropout: Dropout rate applied after hidden activations.
@@ -65,7 +65,7 @@ def _build_mlp(input_dim: int, hidden_dim: int, num_layers: int, dropout: float)
 
 
 class ActorNetwork(nn.Module):
-    """Actor producing Gaussian action distributions conditioned on GW broadcast and memory context."""
+    """Actor producing categorical action distributions over the discrete Crafter actions."""
 
     def __init__(self, config: ActorConfig) -> None:
         """Initialize the policy network.
@@ -82,8 +82,7 @@ class ActorNetwork(nn.Module):
             num_layers=config.num_layers,
             dropout=config.dropout,
         )
-        self.mean_head = nn.Linear(config.hidden_dim, config.action_dim)
-        self.log_std = nn.Parameter(torch.zeros(config.action_dim))
+        self.logits_head = nn.Linear(config.hidden_dim, config.action_dim)
 
     def forward(self, features: torch.Tensor) -> torch.distributions.Distribution:
         """Compute a factorized Normal policy distribution.
@@ -92,17 +91,13 @@ class ActorNetwork(nn.Module):
             features: Latent features describing the policy context.
 
         Returns:
-            ``torch.distributions.Independent`` Normal over ``action_dim`` actions.
+            ``torch.distributions.Categorical`` over ``action_dim`` discrete actions.
         """
 
         features_float = features.float()
         hidden = self.backbone(features_float)
-        mean = self.mean_head(hidden)
-        std = torch.exp(self.log_std).clamp(min=1e-4, max=10.0)
-        return torch.distributions.Independent(
-            torch.distributions.Normal(mean, std),
-            1,
-        )
+        logits = self.logits_head(hidden)
+        return torch.distributions.Categorical(logits=logits)
 
 
 class CriticNetwork(nn.Module):

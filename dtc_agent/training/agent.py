@@ -10,6 +10,7 @@ from typing import Any, Callable, ContextManager, ParamSpec, Protocol, TypeVar, 
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from dtc_agent.agents import ActorConfig, ActorNetwork, CriticConfig, CriticNetwork
 from dtc_agent.cognition import WorkspaceRouter
@@ -152,6 +153,7 @@ class StepResult:
     """Data container returned from ``Agent.act`` / ``TrainingLoop.step``."""
 
     action: torch.Tensor
+    action_index: torch.Tensor | None = None
     intrinsic_reward: torch.Tensor
     novelty: torch.Tensor
     observation_entropy: torch.Tensor
@@ -200,15 +202,16 @@ class CognitiveWaveController:
             [raw_environmental_novelty], device=self.device, dtype=torch.float32
         )
         self.env_stimulus_ema.update(novelty_tensor)
+        running_mean = self.env_stimulus_ema.get_mean().to(self.device)
 
         with self._lock:
             if self._ema_value is None:
-                self._ema_value = novelty_tensor.clone()
+                self._ema_value = running_mean.clone()
             else:
                 momentum = float(self.config.stimulus_ema_momentum)
                 momentum = max(0.0, min(1.0, momentum))
                 self._ema_value = (
-                    (1.0 - momentum) * self._ema_value + momentum * novelty_tensor
+                    (1.0 - momentum) * self._ema_value + momentum * running_mean
                 )
             self.stimulus_history.append(raw_environmental_novelty)
 
@@ -544,6 +547,7 @@ class Agent:
         competence_breakdown: dict[str, torch.Tensor] | None = None
         epistemic_novelty: torch.Tensor | None = None
         current_real_entropy: float | None = None
+        selected_action_index: torch.Tensor | None = None
 
         restore_world_model = False
         if not train and self.world_model.training:
@@ -583,18 +587,22 @@ class Agent:
                     base_entropy = action_dist.entropy()
                     wave_mods = self.cognitive_wave_controller.current_modifiers
                     entropy_scale = wave_mods.get("actor_entropy_scale", 1.0)
-                    if train and entropy_scale > 1.0:
-                        action = action_dist.rsample()
-                        noise_scale = max(0.0, (entropy_scale - 1.0) * 0.1)
-                        if noise_scale > 0.0:
-                            action = action + torch.randn_like(action) * noise_scale
-                        if torch.isfinite(base_entropy).all():
-                            entropy_value = float(base_entropy.mean().item())
-                        else:
-                            entropy_value = 0.0
-                    else:
-                        action = action_dist.rsample()
+                    sample_dist = action_dist
+                    logits = getattr(action_dist, "logits", None)
+                    if train and entropy_scale > 1.0 and logits is not None:
+                        temperature = max(1.0, float(entropy_scale))
+                        adjusted_logits = logits / temperature
+                        sample_dist = torch.distributions.Categorical(logits=adjusted_logits)
+                    action_indices = sample_dist.sample()
+                    selected_action_index = action_indices.detach()
+                    action = F.one_hot(
+                        action_indices,
+                        num_classes=self.config.dynamics.action_dim,
+                    ).to(device=self.device, dtype=latents["z_self"].dtype)
+                    if torch.isfinite(base_entropy).all():
                         entropy_value = float(base_entropy.mean().item())
+                    else:
+                        entropy_value = 0.0
 
                     with self._state_lock:
                         if not hasattr(self, "_real_entropy_history"):
@@ -624,7 +632,20 @@ class Agent:
                         latents["z_self"], broadcast, memory_context
                     )
                 else:
-                    action = action.to(self.device, non_blocking=True)
+                    action = action.to(
+                        device=self.device,
+                        dtype=latents["z_self"].dtype,
+                        non_blocking=True,
+                    )
+                    if action.ndim == 1:
+                        action = action.unsqueeze(0)
+                    if action.size(0) != batch:
+                        if action.size(0) == 1:
+                            action = action.expand(batch, -1)
+                        else:
+                            raise ValueError("action batch dimension mismatch")
+                    if action.size(-1) == self.config.dynamics.action_dim:
+                        selected_action_index = torch.argmax(action, dim=-1).detach()
                     # Synchronize to ensure action transfer is complete
                     if self.device.type == "cuda":
                         torch.cuda.synchronize(self.device)
@@ -697,8 +718,13 @@ class Agent:
         raw_reward_components = {key: value.detach() for key, value in raw_components.items()}
         self.write_memory(latents["z_self"], broadcast)
 
+        action_index_tensor = (
+            selected_action_index.detach() if selected_action_index is not None else None
+        )
+
         return StepResult(
             action=action.detach(),
+            action_index=action_index_tensor,
             intrinsic_reward=intrinsic.detach(),
             novelty=slot_novelty.detach(),
             observation_entropy=observation_entropy.detach(),

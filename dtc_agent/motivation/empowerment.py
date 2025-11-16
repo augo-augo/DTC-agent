@@ -19,6 +19,7 @@ class EmpowermentConfig:
         hidden_dim: Width of the projection MLPs.
         queue_capacity: Number of latent states stored for negative sampling.
         temperature: Softmax temperature used in the InfoNCE objective.
+        negatives_per_sample: Number of negative samples compared against each positive.
     """
 
     latent_dim: int
@@ -26,6 +27,7 @@ class EmpowermentConfig:
     hidden_dim: int = 128
     queue_capacity: int = 128
     temperature: float = 0.1
+    negatives_per_sample: int = 32
 
 
 class InfoNCEEmpowermentEstimator(nn.Module):
@@ -148,23 +150,28 @@ class InfoNCEEmpowermentEstimator(nn.Module):
     def _collect_negatives(self, latent: torch.Tensor) -> torch.Tensor:
         """Collect a diverse batch of negative samples from the replay queue."""
 
-        batch, _ = latent.shape
+        batch, latent_dim = latent.shape
+        k = max(1, self.config.negatives_per_sample)
+
+        def _fallback() -> torch.Tensor:
+            noise = torch.randn(batch, k, latent_dim, device=latent.device) * 0.05
+            tiled = latent.detach().unsqueeze(1).expand(batch, k, -1).float()
+            noisy = tiled + noise
+            embedded = self.latent_proj(noisy.reshape(-1, latent_dim))
+            return embedded.view(batch, k, -1)
+
         available = int(self._queue_count.item())
-
-        if available == 0:
-            return self.latent_proj(latent.detach().float()).unsqueeze(1)
-
         capacity = self._queue.size(0)
         limit = min(available, capacity)
+
+        if limit <= 1:
+            return _fallback()
+
         current_ptr = int(self._queue_step.item()) % capacity
 
-        # CRITICAL: Exclude the most recent entries to avoid temporal correlation
-        # This prevents the queue from containing the current batch as negatives
-        if limit <= 1:
-            return self.latent_proj(latent.detach().float()).unsqueeze(1)
-
+        # Exclude the most recent entries to avoid temporal correlation with positives.
         min_age = max(int(limit * 0.15), 16)
-        min_age = min(min_age, limit - max(batch, 16))
+        min_age = min(min_age, max(1, limit - max(batch, 16)))
 
         valid_indices: list[int] = []
         for i in range(limit):
@@ -173,12 +180,15 @@ class InfoNCEEmpowermentEstimator(nn.Module):
                 valid_indices.append(i)
 
         if len(valid_indices) < max(8, batch):
-            exclusion_window = min(8, limit // 4)
+            exclusion_window = min(8, max(1, limit // 4))
             valid_indices = [
                 i
                 for i in range(limit)
                 if (current_ptr - i + capacity) % capacity > exclusion_window
             ]
+
+        if not valid_indices:
+            return _fallback()
 
         queue_tensor = self._queue[:limit]
         if queue_tensor.device != latent.device:
@@ -188,19 +198,16 @@ class InfoNCEEmpowermentEstimator(nn.Module):
             valid_indices, device=latent.device, dtype=torch.long
         )
 
-        if valid_indices_tensor.numel() < batch:
-            noise = torch.randn_like(latent) * 0.1
-            return self.latent_proj((latent.detach() + noise).float()).unsqueeze(1)
+        if valid_indices_tensor.numel() == 0:
+            return _fallback()
 
-        # Sample without replacement
-        num_negatives = batch
-        perm = torch.randperm(valid_indices_tensor.numel(), device=latent.device)
-        idx = valid_indices_tensor[perm[:num_negatives]]
-
-        sampled = queue_tensor.index_select(0, idx).detach()
-        sampled_float = sampled.float()
-        embedded = self.latent_proj(sampled_float)
-        return embedded.unsqueeze(1)
+        choice_indices = torch.randint(
+            0, valid_indices_tensor.numel(), (batch, k), device=latent.device
+        )
+        gathered = valid_indices_tensor[choice_indices.view(-1)]
+        sampled = queue_tensor.index_select(0, gathered).detach().float()
+        embedded = self.latent_proj(sampled)
+        return embedded.view(batch, k, -1)
 
     def _enqueue_latents(self, latent: torch.Tensor) -> None:
         if latent.numel() == 0:

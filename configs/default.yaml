@@ -48,6 +48,7 @@ empowerment:
   hidden_dim: 512
   queue_capacity: 2048
   temperature: 0.5
+  negatives_per_sample: 64
 
 episodic_memory:
   capacity: 1000

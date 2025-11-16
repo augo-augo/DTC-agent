@@ -200,7 +200,12 @@ def _crafter_info_metrics(info: dict | None) -> tuple[Dict[str, float], int]:
     return metrics, achievements_count
 
 
-def _select_env_action(action_tensor: torch.Tensor, action_space_n: int) -> int:
+def _select_env_action(
+    action_tensor: torch.Tensor, action_space_n: int, action_index: torch.Tensor | None
+) -> int:
+    if action_index is not None:
+        flat_index = action_index.detach().view(-1)[0].to("cpu")
+        return int(flat_index.item()) % action_space_n
     if action_tensor.ndim != 2:
         raise ValueError("Expected batched action tensor from TrainingLoop.step")
     usable = min(action_tensor.shape[-1], action_space_n)
@@ -251,7 +256,9 @@ def _actor_loop(
                         self_state=self_state_vec if self_state_vec.numel() > 0 else None,
                         train=False,
                     )
-            env_action = _select_env_action(policy_result.action, env.action_space.n)
+            env_action = _select_env_action(
+                policy_result.action, env.action_space.n, policy_result.action_index
+            )
             next_observation, env_reward, terminated, info = env.step(env_action)
             truncated = False
             next_tensor = _preprocess_frame(
