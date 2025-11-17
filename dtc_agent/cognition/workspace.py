@@ -19,6 +19,10 @@ class WorkspaceConfig:
         action_cost_scale: Scaling factor converting action magnitude to cost.
         ucb_weight: Weight applied to the UCB bonus when scoring slots.
         ucb_beta: Exploration strength for the UCB bonus term.
+        novelty_weight_bored: Optional novelty weight override when the agent is
+            bored.
+        progress_weight_bored: Optional progress weight override when bored.
+        novelty_weight_anxious: Optional novelty weight override when anxious.
     """
 
     broadcast_slots: int
@@ -30,6 +34,9 @@ class WorkspaceConfig:
     action_cost_scale: float = 1.0
     ucb_weight: float = 0.2
     ucb_beta: float = 1.0
+    novelty_weight_bored: float | None = None
+    progress_weight_bored: float | None = None
+    novelty_weight_anxious: float | None = None
 
 
 class WorkspaceRouter:
@@ -51,6 +58,7 @@ class WorkspaceRouter:
         ucb: torch.Tensor,
         cost: torch.Tensor,
         self_mask: torch.Tensor,
+        cognitive_mode: str = "LEARNING",
     ) -> torch.Tensor:
         """Compute slot scores by combining novelty, progress, UCB, and cost.
 
@@ -64,9 +72,20 @@ class WorkspaceRouter:
         Returns:
             Tensor of per-slot scores favouring novel yet inexpensive slots.
         """
+        novelty_w = self.config.novelty_weight
+        progress_w = self.config.progress_weight
+        if cognitive_mode == "BORED":
+            if self.config.novelty_weight_bored is not None:
+                novelty_w = self.config.novelty_weight_bored
+            if self.config.progress_weight_bored is not None:
+                progress_w = self.config.progress_weight_bored
+        elif cognitive_mode == "ANXIOUS":
+            if self.config.novelty_weight_anxious is not None:
+                novelty_w = self.config.novelty_weight_anxious
+
         score = (
-            self.config.novelty_weight * novelty
-            + self.config.progress_weight * progress
+            novelty_w * novelty
+            + progress_w * progress
             + self.config.ucb_weight * ucb
             - self.config.cost_weight * cost
         )

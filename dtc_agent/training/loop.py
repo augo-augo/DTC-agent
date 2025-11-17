@@ -1,5 +1,4 @@
 from __future__ import annotations
-from collections import deque
 from dataclasses import dataclass, field
 from contextlib import nullcontext
 from typing import Any, Callable, ContextManager, ParamSpec, Protocol, TypeVar, cast
@@ -13,6 +12,7 @@ from dtc_agent.agents import (
     CriticNetwork,
 )
 from dtc_agent.cognition import WorkspaceConfig, WorkspaceRouter
+from dtc_agent.cognition.temporal_self import TemporalSelfConfig, TemporalSelfModule
 from dtc_agent.memory import EpisodicBuffer, EpisodicBufferConfig
 from dtc_agent.motivation import (
     EmpowermentConfig,
@@ -20,7 +20,6 @@ from dtc_agent.motivation import (
     IntrinsicRewardGenerator,
     InfoNCEEmpowermentEstimator,
     estimate_observation_entropy,
-    ensemble_epistemic_novelty,
 )
 from dtc_agent.utils import sanitize_gradients, sanitize_tensor
 from dtc_agent.world_model import (
@@ -275,113 +274,6 @@ class StepResult:
 
 
 @dataclass
-class CognitiveWaveConfig:
-    """Parameters controlling adaptive dream/explore balancing.
-
-    Attributes:
-        stimulus_history_window: Number of steps considered when computing
-            stimulus statistics.
-        stimulus_ema_momentum: Momentum for the short-term stimulus tracker.
-        dream_entropy_scale: Upper bound for dream entropy scaling.
-        actor_entropy_scale: Upper bound for actor entropy scaling.
-        learning_rate_scale: Maximum factor applied to the optimizer LR.
-    """
-
-    stimulus_history_window: int = 1000
-    stimulus_ema_momentum: float = 0.1
-    dream_entropy_scale: float = 10.0
-    actor_entropy_scale: float = 5.0
-    learning_rate_scale: float = 2.0
-
-
-class CognitiveWaveController:
-    """Balance internal dreaming and external exploration via stimulus tracking."""
-
-    def __init__(self, config: CognitiveWaveConfig, device: torch.device) -> None:
-        """Initialize the controller with history buffers and EMA state.
-
-        Args:
-            config: Hyper-parameters describing adaptive modulation behavior.
-            device: Device used for running mean computations.
-        """
-
-        self.config = config
-        self.device = device
-        self.stimulus_history: deque[float] = deque(
-            maxlen=max(1, config.stimulus_history_window)
-        )
-        self.env_stimulus_ema = RunningMeanStd(device=device, epsilon=1e-4)
-        self._ema_value: torch.Tensor | None = None
-        self._current_modifiers = self._default_modifiers()
-
-    @property
-    def current_modifiers(self) -> dict[str, float]:
-        """Return the latest training modifiers derived from stimulus levels."""
-
-        return dict(self._current_modifiers)
-
-    def update(self, raw_environmental_novelty: float, step: int) -> None:
-        """Update modulation coefficients from the current environmental novelty.
-
-        Args:
-            raw_environmental_novelty: Scalar novelty observed from the
-                environment.
-            step: Global training step (reserved for future use).
-        """
-
-        del step  # Reserved for future diagnostics
-
-        novelty_tensor = torch.tensor(
-            [raw_environmental_novelty], device=self.device, dtype=torch.float32
-        )
-        self.env_stimulus_ema.update(novelty_tensor)
-        if self._ema_value is None:
-            self._ema_value = novelty_tensor.clone()
-        else:
-            momentum = float(self.config.stimulus_ema_momentum)
-            momentum = max(0.0, min(1.0, momentum))
-            self._ema_value = (
-                (1.0 - momentum) * self._ema_value + momentum * novelty_tensor
-            )
-        self.stimulus_history.append(raw_environmental_novelty)
-
-        if len(self.stimulus_history) < self.config.stimulus_history_window:
-            self._current_modifiers = self._default_modifiers()
-            return
-
-        assert self._ema_value is not None
-        stimulus_level = float(self._ema_value.item())
-        stimulus_baseline = sum(self.stimulus_history) / len(self.stimulus_history)
-
-        stimulus_deficit = max(0.0, stimulus_baseline - stimulus_level)
-        stimulus_surplus = max(0.0, stimulus_level - stimulus_baseline)
-
-        dream_boost = 1.0 + (stimulus_deficit * self.config.dream_entropy_scale)
-        dream_boost = max(1.0, min(self.config.dream_entropy_scale, dream_boost))
-        actor_boost = 1.0 + (stimulus_deficit * self.config.actor_entropy_scale)
-        actor_boost = max(1.0, min(self.config.actor_entropy_scale, actor_boost))
-        lr_scale = 1.0 + (stimulus_surplus * self.config.learning_rate_scale)
-        lr_scale = max(1.0, min(self.config.learning_rate_scale, lr_scale))
-
-        self._current_modifiers = {
-            "dream_entropy_boost": dream_boost,
-            "actor_entropy_scale": actor_boost,
-            "learning_rate_scale": lr_scale,
-            "stimulus_level": stimulus_level,
-            "stimulus_deficit": stimulus_deficit,
-        }
-
-    def _default_modifiers(self) -> dict[str, float]:
-        return {
-            "dream_entropy_boost": 1.0,
-            "actor_entropy_scale": 1.0,
-            "learning_rate_scale": 1.0,
-            "stimulus_level": 0.0,
-            "stimulus_deficit": 0.0,
-        }
-
-
-@dataclass
 class TrainingConfig:
     """Aggregate configuration for building the full training loop.
 
@@ -419,9 +311,7 @@ class TrainingConfig:
     adaptive_entropy: bool = True
     adaptive_entropy_target: float = 1.0
     adaptive_entropy_scale: float = 5.0
-    cognitive_wave: CognitiveWaveConfig = field(
-        default_factory=CognitiveWaveConfig
-    )
+    temporal_self: TemporalSelfConfig = field(default_factory=TemporalSelfConfig)
 
     @property
     def effective_dream_horizon(self) -> int:
@@ -468,15 +358,17 @@ class TrainingLoop:
         self.reward = IntrinsicRewardGenerator(
             config.reward,
             empowerment_estimator=self.empowerment,
-            novelty_metric=ensemble_epistemic_novelty,
         )
         self.reward_normalizer = RewardNormalizer(device=self.device)
+        self.temporal_self = TemporalSelfModule(config.temporal_self).to(self.device)
+        self.current_temporal_state: dict[str, Any] | None = None
         # Policy dimensions derived from encoder/workspace layout.
         slot_dim = config.encoder.slot_dim
         policy_feature_dim = (
             slot_dim
             + slot_dim * config.workspace.broadcast_slots
             + config.episodic_memory.key_dim
+            + self.temporal_self.field_dim
         )
         actor_net = ActorNetwork(
             ActorConfig(
@@ -537,9 +429,6 @@ class TrainingLoop:
         self.autocast_enabled = self.device.type == "cuda"
         self.grad_scaler = _create_grad_scaler(self.device.type, self.autocast_enabled)
         self.novelty_tracker = RunningMeanStd(device=self.device)
-        self.cognitive_wave_controller = CognitiveWaveController(
-            config.cognitive_wave, self.device
-        )
 
     def _autocast_ctx(self) -> ContextManager[None]:
         if not self.autocast_enabled:
@@ -637,6 +526,20 @@ class TrainingLoop:
         if state_tensor is not None:
             self._latest_self_state = state_tensor.detach()
 
+        if (
+            self.current_temporal_state is None
+            or self.current_temporal_state["field_tensor"].size(0) != batch
+        ):
+            self.current_temporal_state = self.temporal_self.get_default_state(
+                batch_size=batch,
+                device=self.device,
+                dtype=observation.dtype,
+            )
+        temporal_state_prev = self.current_temporal_state
+        cognitive_mode = temporal_state_prev.get("cognitive_mode", "LEARNING")
+        temporal_field = temporal_state_prev["field_tensor"]
+        stimulus_deficit = float(temporal_state_prev.get("stimulus_deficit", 0.0))
+
         competence_breakdown: dict[str, torch.Tensor] | None = None
         epistemic_novelty: torch.Tensor | None = None
         current_real_entropy: float | None = None
@@ -669,16 +572,20 @@ class TrainingLoop:
                     action_for_routing,
                     state_tensor,
                     update_stats=True,
+                    cognitive_mode=cognitive_mode,
                 )
-                features = self._assemble_features(latents["z_self"], broadcast, memory_context)
+                features = self._assemble_features(
+                    latents["z_self"], broadcast, memory_context, temporal_field
+                )
                 if action is None:
                     action_dist = self._call_with_fallback("actor", features)
                     base_entropy = action_dist.entropy()
-                    wave_mods = self.cognitive_wave_controller.current_modifiers
-                    entropy_scale = wave_mods.get("actor_entropy_scale", 1.0)
-                    if train and entropy_scale > 1.0:
+                    actor_boost = 1.0 + (
+                        stimulus_deficit * self.config.temporal_self.actor_entropy_scale
+                    )
+                    if train and actor_boost > 1.0:
                         action = action_dist.rsample()
-                        noise_scale = max(0.0, (entropy_scale - 1.0) * 0.1)
+                        noise_scale = max(0.0, (actor_boost - 1.0) * 0.1)
                         if noise_scale > 0.0:
                             action = action + torch.randn_like(action) * noise_scale
                         action = action.clamp(-10.0, 10.0)
@@ -711,8 +618,11 @@ class TrainingLoop:
                         action,
                         state_tensor,
                         update_stats=False,
+                        cognitive_mode=cognitive_mode,
                     )
-                    features = self._assemble_features(latents["z_self"], broadcast, memory_context)
+                    features = self._assemble_features(
+                        latents["z_self"], broadcast, memory_context, temporal_field
+                    )
                 else:
                     action = action.to(self.device, non_blocking=True)
 
@@ -749,26 +659,22 @@ class TrainingLoop:
                     print(f"[STEP {self._step_count}] ERROR: NaN/Inf in sampled action!")
                     action = sanitize_tensor(action, replacement=0.0)
 
+                self.current_temporal_state = self.temporal_self(
+                    temporal_state_prev, novelty
+                )
                 self.reward._step_count = self._step_count
                 intrinsic_raw, norm_components, raw_components = self.reward.get_intrinsic_reward(
-                    novelty,
-                    observation_entropy,
-                    action,
-                    latent_state,
+                    temporal_state=self.current_temporal_state,
+                    novelty_batch=novelty,
+                    observation_entropy=observation_entropy,
+                    action=action,
+                    latent=latent_state,
                     self_state=state_tensor,
                     return_components=True,
                 )
 
-                raw_novelty_tensor = raw_components.get("explore")
-                if raw_novelty_tensor is not None:
-                    raw_novelty_mean = float(raw_novelty_tensor.mean().item())
-                    self.cognitive_wave_controller.update(
-                        raw_novelty_mean, self._step_count
-                    )
-
-                competence_breakdown = getattr(
-                    self.reward, "_last_competence_breakdown", {}
-                )
+                last_breakdown = self.temporal_self.last_competence_breakdown
+                competence_breakdown = last_breakdown if last_breakdown is not None else {}
         finally:
             if restore_world_model:
                 self.world_model.train()
@@ -849,6 +755,7 @@ class TrainingLoop:
         action: torch.Tensor,
         self_state: torch.Tensor | None,
         update_stats: bool,
+        cognitive_mode: str = "LEARNING",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         slot_novelty = slot_values.var(dim=-1, unbiased=False)
         if update_stats:
@@ -927,6 +834,7 @@ class TrainingLoop:
             ucb=ucb,
             cost=slot_cost,
             self_mask=self_mask,
+            cognitive_mode=cognitive_mode,
         )
         broadcast = self.workspace.broadcast(slot_values, scores=scores)
         return broadcast, scores, slot_novelty, slot_progress, slot_cost
@@ -1013,9 +921,21 @@ class TrainingLoop:
         z_self: torch.Tensor,
         broadcast: torch.Tensor,
         memory_context: torch.Tensor,
+        temporal_field: torch.Tensor,
     ) -> torch.Tensor:
-        broadcast_flat = broadcast.flatten(start_dim=1)
-        return torch.cat([z_self, broadcast_flat, memory_context], dim=-1)
+        broadcast_flat = broadcast.flatten(start_dim=1).to(dtype=z_self.dtype)
+        temporal = temporal_field
+        if temporal.size(0) != z_self.size(0):
+            temporal = torch.zeros(
+                z_self.size(0),
+                temporal_field.size(-1),
+                device=z_self.device,
+                dtype=z_self.dtype,
+            )
+        else:
+            temporal = temporal.to(device=z_self.device, dtype=z_self.dtype)
+        memory_aligned = memory_context.to(device=z_self.device, dtype=z_self.dtype)
+        return torch.cat([z_self, broadcast_flat, memory_aligned, temporal], dim=-1)
 
     def _optimize(self) -> tuple[int, dict[str, float]] | None:
         if len(self.rollout_buffer) < self.batch_size:
@@ -1028,8 +948,15 @@ class TrainingLoop:
         if not self._check_parameter_health():
             print("[TRAINING] Skipping update due to corrupted parameters")
             return None
-        wave_modifiers = self.cognitive_wave_controller.current_modifiers
-        current_lr = self.config.optimizer_lr * wave_modifiers["learning_rate_scale"]
+        temporal_context = self.current_temporal_state
+        if temporal_context is None:
+            temporal_context = self.temporal_self.get_default_state(
+                batch_size=self.batch_size,
+                device=self.device,
+                dtype=torch.float32,
+            )
+        lr_scale = float(temporal_context.get("learning_rate_scale", 1.0))
+        current_lr = self.config.optimizer_lr * lr_scale
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = current_lr
         observations, actions, next_observations, self_states = self.rollout_buffer.sample(
@@ -1061,9 +988,27 @@ class TrainingLoop:
                 actions,
                 self_states,
                 update_stats=False,
+                cognitive_mode=temporal_context.get("cognitive_mode", "LEARNING"),
             )
             latent_state = broadcast.mean(dim=1)
-            features = self._assemble_features(latents["z_self"], broadcast, memory_context)
+            temporal_features = temporal_context.get("field_tensor")
+            if (
+                temporal_features is None
+                or temporal_features.size(0) != latents["z_self"].size(0)
+            ):
+                temporal_features = torch.zeros(
+                    latents["z_self"].size(0),
+                    self.temporal_self.field_dim,
+                    device=self.device,
+                    dtype=latents["z_self"].dtype,
+                )
+            else:
+                temporal_features = temporal_features.to(
+                    device=self.device, dtype=latents["z_self"].dtype
+                )
+            features = self._assemble_features(
+                latents["z_self"], broadcast, memory_context, temporal_features
+            )
 
             predictions = self.world_model.predict_next_latents(latent_state, actions)
             decoded = self.world_model.decode_predictions(predictions, use_frozen=False)
@@ -1100,7 +1045,7 @@ class TrainingLoop:
                     )
 
             dream_loss, actor_loss, critic_loss, dream_metrics = self._stable_dreaming(
-                latents, wave_modifiers
+                latents
             )
             total_loss = world_model_loss + actor_loss + critic_loss + dream_loss + self_state_loss
 
@@ -1164,11 +1109,13 @@ class TrainingLoop:
             "train/critic_loss": float(critic_loss.detach().cpu().item()),
             "train/dream_loss_empowerment": float(dream_loss.detach().cpu().item()),
             "train/self_state_loss": float(self_state_loss.detach().cpu().item()),
-            "wave/stimulus_level": float(wave_modifiers["stimulus_level"]),
-            "wave/stimulus_deficit": float(wave_modifiers["stimulus_deficit"]),
-            "wave/learning_rate_scale": float(
-                wave_modifiers["learning_rate_scale"]
+            "temporal/stimulus_level": float(
+                temporal_context.get("stimulus_level", 0.0)
             ),
+            "temporal/stimulus_deficit": float(
+                temporal_context.get("stimulus_deficit", 0.0)
+            ),
+            "temporal/learning_rate_scale": float(lr_scale),
         }
         if emp_diag is not None:
             metrics["debug/empowerment_queue_size"] = float(emp_diag["queue_size"])
@@ -1183,7 +1130,6 @@ class TrainingLoop:
     def _stable_dreaming(
         self,
         latents: dict[str, torch.Tensor],
-        wave_modifiers: dict[str, float],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         chunk_size = max(1, self.config.dream_chunk_size)
         num_chunks = max(1, self.config.num_dream_chunks)
@@ -1218,135 +1164,159 @@ class TrainingLoop:
         counterfactual_rates: list[torch.Tensor] = []
         latent_drift_norms: list[torch.Tensor] = []
         ensemble_noise_base = 0.05
-        for _ in range(num_chunks):
-            for _ in range(chunk_size):
-                broadcast, _, _, _, _ = self._route_slots(
-                    current_latents["slots"],
-                    current_latents["z_self"],
-                    torch.zeros(
-                        current_latents["slots"].size(0),
-                        self.config.dynamics.action_dim,
-                        device=self.device,
-                    ),
-                    None,
-                    update_stats=False,
-                )
-                features = self._assemble_features(
-                    current_latents["z_self"], broadcast, memory_context
-                )
-                action_dist = self._call_with_fallback("actor", features)
-                sampled_action = action_dist.rsample()
-                dream_log_prob = action_dist.log_prob(sampled_action)
-                dream_entropy = action_dist.entropy()
-
-                entropy_boost = wave_modifiers.get("dream_entropy_boost", 1.0)
-                base_noise_scale = 0.15
-                action_noise = torch.randn_like(sampled_action) * base_noise_scale
-                mutation_scale = 0.1 * (1.0 + entropy_boost)
-                policy_mutation = torch.randn_like(sampled_action) * mutation_scale
-                mutated_action = sampled_action + action_noise + policy_mutation
-                counterfactual_mask = (
-                    torch.rand(sampled_action.shape[0], device=sampled_action.device) < 0.1
-                )
-                wild_action = torch.randn_like(sampled_action) * 2.0
-                executed_action = torch.where(
-                    counterfactual_mask.unsqueeze(-1), wild_action, mutated_action
-                )
-                executed_action = executed_action.clamp(-3.0, 3.0)
-                dream_actions.append(executed_action)
-                counterfactual_rates.append(counterfactual_mask.float().mean())
-
-                latent_state = broadcast.mean(dim=1)
-                if self.world_model.training:
-                    latent_drift = torch.randn_like(latent_state) * 0.05
-                    latent_state = latent_state + latent_drift
-                    latent_drift_norms.append(latent_drift.norm(dim=-1).mean())
-                else:
-                    latent_drift_norms.append(torch.tensor(0.0, device=latent_state.device))
-
-                predictions = self.world_model.predict_next_latents(latent_state, executed_action)
-                if self.world_model.training:
-                    predictions = [
-                        pred
-                        + torch.randn_like(pred)
-                        * (ensemble_noise_base + 0.02 * float(idx))
-                        for idx, pred in enumerate(predictions)
-                    ]
-                decoded = self.world_model.decode_predictions(predictions, use_frozen=False)
-                novelty = self.reward.get_novelty(predictions, decoded)
-                if self._step_count % 100 == 0:
-                    print(f"\n[Dream Novelty Diagnostic at step {self._step_count}]")
-                    print(
-                        "  Novelty: "
-                        f"mean={novelty.mean():.6f}, std={novelty.std():.6f}, "
-                        f"min={novelty.min():.6f}, max={novelty.max():.6f}"
+        temporal_snapshot = self.temporal_self.snapshot()
+        dream_temporal_state = self.temporal_self.get_default_state(
+            batch_size=initial_latents["z_self"].size(0),
+            device=self.device,
+            dtype=initial_latents["z_self"].dtype,
+        )
+        last_entropy_boost = 1.0
+        try:
+            for _ in range(num_chunks):
+                for _ in range(chunk_size):
+                    dream_mode = dream_temporal_state.get("cognitive_mode", "LEARNING")
+                    temporal_field = dream_temporal_state["field_tensor"]
+                    stimulus_deficit_prev = float(
+                        dream_temporal_state.get("stimulus_deficit", 0.0)
                     )
-                    if latent_drift_norms:
+                    broadcast, _, _, _, _ = self._route_slots(
+                        current_latents["slots"],
+                        current_latents["z_self"],
+                        torch.zeros(
+                            current_latents["slots"].size(0),
+                            self.config.dynamics.action_dim,
+                            device=self.device,
+                        ),
+                        None,
+                        update_stats=False,
+                        cognitive_mode=dream_mode,
+                    )
+                    features = self._assemble_features(
+                        current_latents["z_self"], broadcast, memory_context, temporal_field
+                    )
+                    action_dist = self._call_with_fallback("actor", features)
+                    sampled_action = action_dist.rsample()
+                    dream_log_prob = action_dist.log_prob(sampled_action)
+                    dream_entropy = action_dist.entropy()
+
+                    entropy_boost = 1.0 + (
+                        stimulus_deficit_prev * self.config.temporal_self.dream_entropy_scale
+                    )
+                    last_entropy_boost = entropy_boost
+                    base_noise_scale = 0.15
+                    action_noise = torch.randn_like(sampled_action) * base_noise_scale
+                    mutation_scale = 0.1 * entropy_boost
+                    policy_mutation = torch.randn_like(sampled_action) * mutation_scale
+                    mutated_action = sampled_action + action_noise + policy_mutation
+                    counterfactual_mask = (
+                        torch.rand(sampled_action.shape[0], device=sampled_action.device)
+                        < 0.1
+                    )
+                    wild_action = torch.randn_like(sampled_action) * 2.0
+                    executed_action = torch.where(
+                        counterfactual_mask.unsqueeze(-1), wild_action, mutated_action
+                    )
+                    executed_action = executed_action.clamp(-3.0, 3.0)
+                    dream_actions.append(executed_action)
+                    counterfactual_rates.append(counterfactual_mask.float().mean())
+
+                    latent_state = broadcast.mean(dim=1)
+                    if self.world_model.training:
+                        latent_drift = torch.randn_like(latent_state) * 0.05
+                        latent_state = latent_state + latent_drift
+                        latent_drift_norms.append(latent_drift.norm(dim=-1).mean())
+                    else:
+                        latent_drift_norms.append(torch.tensor(0.0, device=latent_state.device))
+
+                    predictions = self.world_model.predict_next_latents(latent_state, executed_action)
+                    if self.world_model.training:
+                        predictions = [
+                            pred
+                            + torch.randn_like(pred)
+                            * (ensemble_noise_base + 0.02 * float(idx))
+                            for idx, pred in enumerate(predictions)
+                        ]
+                    decoded = self.world_model.decode_predictions(predictions, use_frozen=False)
+                    novelty = self.reward.get_novelty(predictions, decoded)
+                    if self._step_count % 100 == 0:
+                        print(f"\n[Dream Novelty Diagnostic at step {self._step_count}]")
                         print(
-                            f"  Latent drift norm (latest): {latent_drift_norms[-1].item():.6f}"
+                            "  Novelty: "
+                            f"mean={novelty.mean():.6f}, std={novelty.std():.6f}, "
+                            f"min={novelty.min():.6f}, max={novelty.max():.6f}"
                         )
-                    print(
-                        f"  Counterfactual rate (latest): {counterfactual_rates[-1].item():.3f}"
+                        if latent_drift_norms:
+                            print(
+                                f"  Latent drift norm (latest): {latent_drift_norms[-1].item():.6f}"
+                            )
+                        print(
+                            f"  Counterfactual rate (latest): {counterfactual_rates[-1].item():.3f}"
+                        )
+                    predicted_obs = decoded[0].rsample()
+                    observation_entropy = estimate_observation_entropy(predicted_obs)
+
+                    if not torch.isfinite(novelty).all() or not torch.isfinite(observation_entropy).all():
+                        print(
+                            f"[DREAM ERROR at step {self._step_count}] Non-finite dream values detected, skipping this dream chunk"
+                        )
+                        return (
+                            torch.tensor(0.0, device=self.device),
+                            torch.tensor(0.0, device=self.device),
+                            torch.tensor(0.0, device=self.device),
+                            {
+                                k: torch.tensor(0.0, device=self.device)
+                                for k in [
+                                    "dream/intrinsic_reward",
+                                    "dream/competence",
+                                    "dream/empowerment",
+                                    "dream/safety",
+                                    "dream/survival",
+                                    "dream/policy_entropy",
+                                    "dream/explore",
+                                    "dream/explore_min",
+                                    "dream/explore_max",
+                                    "dream/explore_raw",
+                                    "dream/explore_raw_min",
+                                    "dream/explore_raw_max",
+                                ]
+                            },
+                        )
+                    dream_temporal_state = self.temporal_self(
+                        dream_temporal_state, novelty
                     )
-                predicted_obs = decoded[0].rsample()
-                observation_entropy = estimate_observation_entropy(predicted_obs)
-
-                if not torch.isfinite(novelty).all() or not torch.isfinite(observation_entropy).all():
-                    print(
-                        f"[DREAM ERROR at step {self._step_count}] Non-finite dream values detected, skipping this dream chunk"
+                    self.reward._step_count = self._step_count
+                    dream_reward, norm_components, raw_components = self.reward.get_intrinsic_reward(
+                        temporal_state=dream_temporal_state,
+                        novelty_batch=novelty,
+                        observation_entropy=observation_entropy,
+                        action=executed_action,
+                        latent=latent_state,
+                        self_state=dream_self_state,
+                        return_components=True,
                     )
-                    return (
-                        torch.tensor(0.0, device=self.device),
-                        torch.tensor(0.0, device=self.device),
-                        torch.tensor(0.0, device=self.device),
-                        {
-                            k: torch.tensor(0.0, device=self.device)
-                            for k in [
-                                "dream/intrinsic_reward",
-                                "dream/competence",
-                                "dream/empowerment",
-                                "dream/safety",
-                                "dream/survival",
-                                "dream/policy_entropy",
-                                "dream/explore",
-                                "dream/explore_min",
-                                "dream/explore_max",
-                                "dream/explore_raw",
-                                "dream/explore_raw_min",
-                                "dream/explore_raw_max",
-                            ]
-                        },
-                    )
-                self.reward._step_count = self._step_count
-                dream_reward, norm_components, raw_components = self.reward.get_intrinsic_reward(
-                    novelty,
-                    observation_entropy,
-                    executed_action,
-                    latent_state,
-                    self_state=dream_self_state,
-                    return_components=True,
-                )
-                competence_terms.append(norm_components["competence"].detach().mean())
-                empowerment_terms.append(norm_components["empowerment"].detach().mean())
-                safety_terms.append(norm_components["safety"].detach().mean())
-                survival_terms.append(norm_components["survival"].detach().mean())
-                intrinsic_terms.append(dream_reward.detach().mean())
-                explore_terms.append(norm_components["explore"].detach().mean())
-                raw_explore_terms.append(raw_components["explore"].detach().mean())
+                    competence_terms.append(norm_components["competence"].detach().mean())
+                    empowerment_terms.append(norm_components["empowerment"].detach().mean())
+                    safety_terms.append(norm_components["safety"].detach().mean())
+                    survival_terms.append(norm_components["survival"].detach().mean())
+                    intrinsic_terms.append(dream_reward.detach().mean())
+                    explore_terms.append(norm_components["explore"].detach().mean())
+                    raw_explore_terms.append(raw_components["explore"].detach().mean())
 
-                normalized_reward = self.reward_normalizer(dream_reward)
+                    normalized_reward = self.reward_normalizer(dream_reward)
 
-                critic_value = self._call_with_fallback("critic", features)
-                values.append(critic_value)
-                rewards.append(normalized_reward)
-                log_probs.append(dream_log_prob)
-                entropies.append(dream_entropy)
+                    critic_value = self._call_with_fallback("critic", features)
+                    values.append(critic_value)
+                    rewards.append(normalized_reward.detach())
+                    log_probs.append(dream_log_prob)
+                    entropies.append(dream_entropy)
 
-                current_latents = self._call_with_fallback("world_model", predicted_obs)
-                memory_context = self._get_memory_context(current_latents["z_self"])
+                    current_latents = self._call_with_fallback("world_model", predicted_obs)
+                    memory_context = self._get_memory_context(current_latents["z_self"])
 
-            current_latents = {key: value.detach() for key, value in current_latents.items()}
-            memory_context = memory_context.detach()
+                current_latents = {key: value.detach() for key, value in current_latents.items()}
+                memory_context = memory_context.detach()
+        finally:
+            self.temporal_self.restore(temporal_snapshot)
 
         final_broadcast, _, _, _, _ = self._route_slots(
             current_latents["slots"],
@@ -1358,9 +1328,10 @@ class TrainingLoop:
             ),
             None,
             update_stats=False,
+            cognitive_mode=dream_temporal_state.get("cognitive_mode", "LEARNING"),
         )
         final_features = self._assemble_features(
-            current_latents["z_self"], final_broadcast, memory_context
+            current_latents["z_self"], final_broadcast, memory_context, dream_temporal_state["field_tensor"]
         )
         next_value = self._call_with_fallback("critic", final_features).detach()
 
@@ -1372,9 +1343,13 @@ class TrainingLoop:
         advantages, returns = self._compute_gae(
             rewards_tensor, values_tensor, next_value
         )
-        dynamic_entropy_coef = (
-            self.config.entropy_coef * wave_modifiers["actor_entropy_scale"]
+        final_stimulus_deficit = float(
+            dream_temporal_state.get("stimulus_deficit", 0.0)
         )
+        actor_boost = 1.0 + (
+            final_stimulus_deficit * self.config.temporal_self.actor_entropy_scale
+        )
+        dynamic_entropy_coef = self.config.entropy_coef * actor_boost
         if self.config.adaptive_entropy:
             current_avg_novelty = float(self.novelty_tracker.mean.clamp(min=0.0).item())
             if current_avg_novelty < self.config.adaptive_entropy_target:
@@ -1442,9 +1417,10 @@ class TrainingLoop:
             "dream/explore_raw": raw_explore_stack.mean().detach(),
             "dream/explore_raw_min": raw_explore_stack.min().detach(),
             "dream/explore_raw_max": raw_explore_stack.max().detach(),
-            "dream/wave_entropy_boost": float(wave_modifiers["dream_entropy_boost"]),
-            "dream/wave_actor_entropy_scale": float(
-                wave_modifiers["actor_entropy_scale"]
+            "dream/entropy_boost": torch.tensor(last_entropy_boost, device=self.device),
+            "dream/actor_boost": torch.tensor(actor_boost, device=self.device),
+            "dream/stimulus_deficit": torch.tensor(
+                final_stimulus_deficit, device=self.device
             ),
             "dream/action_divergence": divergence_values.mean().detach(),
             "dream/action_divergence_std": divergence_values.std(unbiased=False).detach(),
@@ -1491,7 +1467,6 @@ class TrainingLoop:
                 )
 
         return dream_loss, actor_loss, critic_loss, dreaming_metrics
-
     def _compute_gae(
         self,
         rewards: torch.Tensor,

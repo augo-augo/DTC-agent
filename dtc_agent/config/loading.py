@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -9,6 +10,7 @@ from dtc_agent.training import TrainingConfig
 from dtc_agent.agents import ActorConfig, CriticConfig
 from dtc_agent.world_model import DecoderConfig, DynamicsConfig, EncoderConfig
 from dtc_agent.cognition import WorkspaceConfig
+from dtc_agent.cognition.temporal_self import TemporalSelfConfig
 from dtc_agent.motivation import EmpowermentConfig, IntrinsicRewardConfig
 from dtc_agent.memory import EpisodicBufferConfig
 
@@ -38,13 +40,24 @@ def load_training_config(path: str | Path, overrides: Iterable[str] | None = Non
     if not isinstance(resolved, Mapping):
         raise TypeError("Configuration root must be a mapping")
 
-    encoder = EncoderConfig(**_extract_section(resolved, "encoder"))
-    decoder = DecoderConfig(**_extract_section(resolved, "decoder"))
-    dynamics = DynamicsConfig(**_extract_section(resolved, "dynamics"))
-    workspace = WorkspaceConfig(**_extract_section(resolved, "workspace"))
-    reward = IntrinsicRewardConfig(**_extract_section(resolved, "reward"))
-    empowerment = EmpowermentConfig(**_extract_section(resolved, "empowerment"))
-    episodic = EpisodicBufferConfig(**_extract_section(resolved, "episodic_memory"))
+    encoder = _build_dataclass(EncoderConfig, _extract_section(resolved, "encoder"))
+    decoder = _build_dataclass(DecoderConfig, _extract_section(resolved, "decoder"))
+    dynamics = _build_dataclass(DynamicsConfig, _extract_section(resolved, "dynamics"))
+    workspace = _build_dataclass(WorkspaceConfig, _extract_section(resolved, "workspace"))
+    reward = _build_dataclass(
+        IntrinsicRewardConfig, _extract_section(resolved, "reward")
+    )
+    empowerment = _build_dataclass(
+        EmpowermentConfig, _extract_section(resolved, "empowerment")
+    )
+    episodic = _build_dataclass(
+        EpisodicBufferConfig, _extract_section(resolved, "episodic_memory")
+    )
+    temporal_section = resolved.get("temporal_self")
+    if isinstance(temporal_section, Mapping):
+        temporal_self = _build_dataclass(TemporalSelfConfig, temporal_section)
+    else:
+        temporal_self = TemporalSelfConfig()
     actor_mapping = resolved.get("actor")
     if isinstance(actor_mapping, Mapping):
         actor_section = actor_mapping
@@ -104,6 +117,7 @@ def load_training_config(path: str | Path, overrides: Iterable[str] | None = Non
         reward=reward,
         empowerment=empowerment,
         episodic_memory=episodic,
+        temporal_self=temporal_self,
         rollout_capacity=rollout_capacity,
         batch_size=batch_size,
         optimizer_lr=optimizer_lr,
@@ -129,3 +143,11 @@ def _extract_section(resolved: Mapping[str, object], key: str) -> Mapping[str, o
     if not isinstance(section, Mapping):
         raise KeyError(f"Configuration missing required mapping: {key}")
     return section
+
+
+def _build_dataclass(cls, data: Mapping[str, object]):
+    if not is_dataclass(cls):
+        raise TypeError(f"{cls} is not a dataclass")
+    valid_fields = {field.name for field in fields(cls)}
+    filtered = {key: value for key, value in data.items() if key in valid_fields}
+    return cls(**filtered)

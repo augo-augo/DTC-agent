@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Sequence
 
 import torch
 
-from dtc_agent.motivation.metrics import AdaptiveNoveltyCalculator
-
-
-NoveltyMetric = Callable[
-    [Sequence[torch.Tensor], Sequence[torch.distributions.Distribution] | None],
-    torch.Tensor,
-]
+from dtc_agent.motivation.metrics import (
+    AdaptiveNoveltyCalculator,
+    ensemble_epistemic_novelty,
+)
 
 
 class _RewardScaler:
@@ -80,9 +77,7 @@ class IntrinsicRewardConfig:
     """Configuration describing how intrinsic reward components are combined.
 
     Attributes:
-        alpha_fast: EMA coefficient for the fast competence tracker.
         novelty_high: Threshold identifying unusually novel events.
-        anxiety_penalty: Penalty applied when novelty spikes.
         safety_entropy_floor: Minimum acceptable observation entropy.
         lambda_comp: Weight for the competence component.
         lambda_emp: Weight for the empowerment component.
@@ -90,12 +85,9 @@ class IntrinsicRewardConfig:
         lambda_survival: Weight for the survival bonus.
         lambda_explore: Weight for raw novelty-based exploration.
         component_clip: Clamp value applied after per-component normalization.
-        alpha_slow: EMA coefficient for the slow competence tracker.
     """
 
-    alpha_fast: float
     novelty_high: float
-    anxiety_penalty: float
     safety_entropy_floor: float
     lambda_comp: float
     lambda_emp: float
@@ -103,7 +95,6 @@ class IntrinsicRewardConfig:
     lambda_survival: float = 0.0
     lambda_explore: float = 0.0
     component_clip: float = 5.0
-    alpha_slow: float = 0.01
 
 
 class IntrinsicRewardGenerator:
@@ -113,7 +104,6 @@ class IntrinsicRewardGenerator:
         self,
         config: IntrinsicRewardConfig,
         empowerment_estimator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        novelty_metric: NoveltyMetric,
     ) -> None:
         """Initialize the generator and supporting normalization buffers.
 
@@ -121,17 +111,12 @@ class IntrinsicRewardGenerator:
             config: Hyper-parameters controlling reward weighting and smoothing.
             empowerment_estimator: Callable estimating empowerment from an
                 action-latent pair.
-            novelty_metric: Function mapping ensemble predictions to novelty.
         """
 
         self.config = config
         self.empowerment_estimator = empowerment_estimator
-        self.novelty_metric = novelty_metric
+        self.novelty_metric = ensemble_epistemic_novelty
         self.novelty_calculator = AdaptiveNoveltyCalculator(target_mean=1.0)
-        self.ema_fast = torch.tensor(0.0)
-        self.ema_slow = torch.tensor(0.0)
-        self.alpha_slow = config.alpha_slow
-        self._ema_initialized = False
         self._scalers = {
             "competence": _RewardScaler(clamp_value=config.component_clip),
             "empowerment": _RewardScaler(clamp_value=config.component_clip),
@@ -160,83 +145,6 @@ class IntrinsicRewardGenerator:
         raw_novelty = self.novelty_metric(predicted_latents, predicted_observations)
         return self.novelty_calculator(raw_novelty)
 
-    def get_competence(self, novelty: torch.Tensor) -> torch.Tensor:
-        """Track competence progress from novelty statistics.
-
-        Args:
-            novelty: Novelty estimates for the current batch.
-
-        Returns:
-            Tensor representing progress minus anxiety for each item in the
-            batch.
-        """
-
-        if self.ema_fast.device != novelty.device:
-            self.ema_fast = self.ema_fast.to(novelty.device)
-            self.ema_slow = self.ema_slow.to(novelty.device)
-
-        novelty_mean = novelty.detach().mean()
-        if not torch.isfinite(novelty_mean):
-            print(f"[Competence] WARNING: Non-finite novelty detected, using fallback")
-            novelty_mean = torch.tensor(1.0, device=novelty.device)
-
-        if not self._ema_initialized or self.ema_fast.item() < 1e-6:
-            init_value = torch.clamp(novelty_mean, min=0.1, max=10.0)
-            self.ema_fast = init_value.clone()
-            self.ema_slow = init_value.clone()
-            self._ema_initialized = True
-            print(
-                f"[Competence] Initialized EMAs: fast={self.ema_fast.item():.6f}, "
-                f"slow={self.ema_slow.item():.6f}"
-            )
-
-        if not torch.isfinite(self.ema_fast) or not torch.isfinite(self.ema_slow):
-            print(f"[Competence] ERROR: EMAs corrupted, reinitializing")
-            self.ema_fast = torch.clamp(novelty_mean, min=0.1, max=10.0)
-            self.ema_slow = self.ema_fast.clone()
-
-        ema_fast_prev = self.ema_fast.clone()
-        ema_slow_prev = self.ema_slow.clone()
-
-        alpha_fast = self.config.alpha_fast
-        alpha_slow = self.alpha_slow
-        self.ema_fast = (1 - alpha_fast) * self.ema_fast + alpha_fast * novelty_mean
-        self.ema_slow = (1 - alpha_slow) * self.ema_slow + alpha_slow * novelty_mean
-
-        progress = ema_slow_prev - self.ema_fast
-        anxiety = self.config.anxiety_penalty * torch.relu(self.ema_fast - ema_slow_prev)
-        self._last_competence_breakdown = {
-            "progress": progress.detach(),
-            "anxiety": anxiety.detach(),
-            "ema_fast_prev": ema_fast_prev.detach(),
-            "ema_fast": self.ema_fast.detach(),
-            "ema_slow_prev": ema_slow_prev.detach(),
-            "ema_slow": self.ema_slow.detach(),
-        }
-        if hasattr(self, "_step_count") and self._step_count % 100 == 0:
-            print(f"[Competence Diagnostic]")
-            print(f"  Novelty: {novelty.mean():.6f}")
-            print(
-                "  EMA fast prev/current: "
-                f"{ema_fast_prev:.6f} -> {self.ema_fast:.6f}"
-            )
-            print(
-                "  EMA slow prev/current: "
-                f"{ema_slow_prev:.6f} -> {self.ema_slow:.6f}"
-            )
-            print(f"  Progress: {progress.mean():.6f}")
-            print(f"  Anxiety: {anxiety.mean():.6f}")
-        batch_size = novelty.shape[0] if novelty.ndim > 0 else 1
-        if progress.ndim == 0:
-            progress_broadcast = progress.repeat(batch_size)
-        else:
-            progress_broadcast = progress
-        if anxiety.ndim == 0:
-            anxiety_broadcast = anxiety.repeat(batch_size)
-        else:
-            anxiety_broadcast = anxiety
-        return progress_broadcast - anxiety_broadcast.to(device=novelty.device)
-
     def get_safety(self, observation_entropy: torch.Tensor) -> torch.Tensor:
         """Compute a safety penalty when observation entropy falls too low.
 
@@ -263,7 +171,7 @@ class IntrinsicRewardGenerator:
         """
 
         if self_state is None:
-            return torch.tensor(0.0, device=self.ema_fast.device)
+            return torch.tensor(0.0)
 
         if self_state.ndim == 1:
             state = self_state.unsqueeze(0)
@@ -286,7 +194,8 @@ class IntrinsicRewardGenerator:
 
     def get_intrinsic_reward(
         self,
-        novelty: torch.Tensor,
+        temporal_state: dict[str, torch.Tensor] | None,
+        novelty_batch: torch.Tensor,
         observation_entropy: torch.Tensor,
         action: torch.Tensor,
         latent: torch.Tensor,
@@ -296,7 +205,8 @@ class IntrinsicRewardGenerator:
         """Aggregate individual motivational signals into a single reward.
 
         Args:
-            novelty: Epistemic novelty estimates for the current batch.
+            temporal_state: Output dictionary from :class:`TemporalSelfModule`.
+            novelty_batch: Epistemic novelty estimates for the current batch.
             observation_entropy: Entropy of the agent's observations.
             action: Actions sampled by the policy.
             latent: Latent features associated with ``action``.
@@ -310,11 +220,29 @@ class IntrinsicRewardGenerator:
             ``return_components`` is ``True``.
         """
 
-        r_comp = self.get_competence(novelty)
+        if temporal_state is None:
+            r_comp = torch.zeros(
+                action.shape[0], device=action.device, dtype=novelty_batch.dtype
+            )
+        else:
+            comp_tensor = temporal_state.get("R_comp")
+            if comp_tensor is None:
+                r_comp = torch.zeros(
+                    action.shape[0], device=action.device, dtype=novelty_batch.dtype
+                )
+            else:
+                r_comp = comp_tensor.to(device=action.device, dtype=novelty_batch.dtype)
+                if r_comp.ndim == 0:
+                    r_comp = r_comp.expand(action.shape[0])
+                elif r_comp.size(0) != action.shape[0]:
+                    if r_comp.size(0) == 1:
+                        r_comp = r_comp.expand(action.shape[0])
+                    else:
+                        r_comp = r_comp[: action.shape[0]]
         r_emp = self.empowerment_estimator(action, latent)
         r_safe = self.get_safety(observation_entropy)
         r_survival = self.get_survival(self_state).to(device=action.device)
-        r_explore = novelty
+        r_explore = novelty_batch
         batch = action.shape[0]
         if r_comp.ndim == 0:
             r_comp = r_comp.expand(batch)
