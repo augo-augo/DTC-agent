@@ -71,7 +71,7 @@ empowerment:
   temperature: 0.5
 
 episodic_memory:
-  capacity: 1000
+  capacity: 5000
   key_dim: 64
 
 rollout_capacity: 4096
@@ -100,6 +100,7 @@ world_model_coef: 1.0
 
 world_model_ensemble: 5  # Increased from 3 to generate more epistemic novelty
 device: cuda
+
 adaptive_entropy: true
 adaptive_entropy_target: 1.2
 adaptive_entropy_scale: 6.0
