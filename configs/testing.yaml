@@ -28,16 +28,27 @@ workspace:
   action_cost_scale: 0.5
   ucb_weight: 0.3
   ucb_beta: 0.8
+  novelty_weight_bored: 1.8
+  progress_weight_bored: 0.15
+  novelty_weight_anxious: 0.6
 
 reward:
-  alpha_fast: 0.2
   novelty_high: 1.0
-  anxiety_penalty: 0.2
   safety_entropy_floor: 0.2
   lambda_comp: 0.7
   lambda_emp: 0.3
   lambda_safety: 0.3
   lambda_explore: 0.5
+
+temporal_self:
+  stimulus_history_window: 250
+  stimulus_ema_momentum: 0.2
+  dream_entropy_scale: 5.0
+  actor_entropy_scale: 2.5
+  learning_rate_scale: 1.5
+  alpha_fast: 0.2
+  alpha_slow: 0.01
+  anxiety_penalty: 0.2
 
 empowerment:
   latent_dim: 32
@@ -74,9 +85,3 @@ world_model_coef: 1.0
 
 world_model_ensemble: 3
 device: cpu
-cognitive_wave:
-  stimulus_history_window: 250
-  stimulus_ema_momentum: 0.2
-  dream_entropy_scale: 5.0
-  actor_entropy_scale: 2.5
-  learning_rate_scale: 1.5

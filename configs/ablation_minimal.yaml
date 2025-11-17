@@ -30,18 +30,29 @@ workspace:
   action_cost_scale: 1.0
   ucb_weight: 0.4
   ucb_beta: 1.0
+  novelty_weight_bored: 1.5
+  progress_weight_bored: 0.3
+  novelty_weight_anxious: 0.5
 
 # ABLATION: Simplified reward with no exploration bonus
 reward:
-  alpha_fast: 0.3              # Faster EMA
   novelty_high: 10.0           # Disabled anxiety penalty
-  anxiety_penalty: 0.1         # Minimal
   safety_entropy_floor: 0.1
   lambda_comp: 2.0             # Double weight
   lambda_emp: 0.3              # Slightly increased
   lambda_safety: 0.2           # Slightly increased
   lambda_explore: 0.0          # DISABLED for ablation
   component_clip: 5.0
+
+temporal_self:
+  stimulus_history_window: 1000
+  stimulus_ema_momentum: 0.1
+  dream_entropy_scale: 1.0     # No boosting
+  actor_entropy_scale: 1.0     # No boosting
+  learning_rate_scale: 1.0     # No scaling
+  alpha_fast: 0.3
+  alpha_slow: 0.01
+  anxiety_penalty: 0.1         # Minimal
 
 empowerment:
   latent_dim: 64
@@ -83,11 +94,3 @@ device: cuda
 adaptive_entropy: true
 adaptive_entropy_target: 1.0
 adaptive_entropy_scale: 5.0
-
-# ABLATION: Disable cognitive wave
-cognitive_wave:
-  stimulus_history_window: 1000
-  stimulus_ema_momentum: 0.1
-  dream_entropy_scale: 1.0     # No boosting
-  actor_entropy_scale: 1.0     # No boosting
-  learning_rate_scale: 1.0     # No scaling

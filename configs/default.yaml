@@ -29,12 +29,12 @@ workspace:
   action_cost_scale: 1.0
   ucb_weight: 0.4
   ucb_beta: 1.0
+  novelty_weight_bored: 2.0
+  progress_weight_bored: 0.3
+  novelty_weight_anxious: 0.5
 
 reward:
-  alpha_fast: 0.3
-  alpha_slow: 0.02
   novelty_high: 2.0
-  anxiety_penalty: 0.1
   safety_entropy_floor: 0.1
   lambda_comp: 1.0      # Reduced to let raw novelty lead curiosity
   lambda_emp: 0.5       # Increased from 0.3 to boost drive for influence
@@ -42,6 +42,16 @@ reward:
   lambda_survival: 0.1
   lambda_explore: 0.65  # Further increased to reward raw novelty directly
   component_clip: 3.0
+
+temporal_self:
+  stimulus_history_window: 350
+  stimulus_ema_momentum: 0.25
+  dream_entropy_scale: 14.0
+  actor_entropy_scale: 6.5
+  learning_rate_scale: 2.5
+  alpha_fast: 0.3
+  alpha_slow: 0.02
+  anxiety_penalty: 0.1
 
 empowerment:
   latent_dim: 64
@@ -83,10 +93,3 @@ device: cuda
 adaptive_entropy: true
 adaptive_entropy_target: 1.2
 adaptive_entropy_scale: 6.0
-
-cognitive_wave:
-  stimulus_history_window: 350
-  stimulus_ema_momentum: 0.25
-  dream_entropy_scale: 14.0
-  actor_entropy_scale: 6.5
-  learning_rate_scale: 2.5
