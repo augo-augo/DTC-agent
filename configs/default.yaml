@@ -39,8 +39,8 @@ reward:
   component_clip: 3.0
 
 temporal_self:
-  stimulus_history_window: 350
-  stimulus_ema_momentum: 0.25
+  stimulus_history_window: 1000
+  stimulus_ema_momentum: 0.1
   dream_entropy_scale: 25.0
   actor_entropy_scale: 10.0
   learning_rate_scale: 2.5
@@ -49,7 +49,7 @@ temporal_self:
   anxiety_penalty: 0.1
   lambda_comp_base: 1.0
   lambda_comp_bored: 0.0
-  lambda_emp_base: 0.0
+  lambda_emp_base: 0.3
   lambda_safety_base: 0.5
   lambda_safety_anxious: 2.0
   lambda_survival_base: 0.1
@@ -77,7 +77,7 @@ episodic_memory:
 rollout_capacity: 4096
 batch_size: 128
 optimizer_lr: 0.0005
-optimizer_empowerment_weight: 0.0
+optimizer_empowerment_weight: 0.05
 
 actor:
   hidden_dim: 256
