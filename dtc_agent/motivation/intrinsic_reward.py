@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 import torch
 
@@ -79,21 +79,11 @@ class IntrinsicRewardConfig:
     Attributes:
         novelty_high: Threshold identifying unusually novel events.
         safety_entropy_floor: Minimum acceptable observation entropy.
-        lambda_comp: Weight for the competence component.
-        lambda_emp: Weight for the empowerment component.
-        lambda_safety: Weight for the safety penalty.
-        lambda_survival: Weight for the survival bonus.
-        lambda_explore: Weight for raw novelty-based exploration.
         component_clip: Clamp value applied after per-component normalization.
     """
 
     novelty_high: float
     safety_entropy_floor: float
-    lambda_comp: float
-    lambda_emp: float
-    lambda_safety: float
-    lambda_survival: float = 0.0
-    lambda_explore: float = 0.0
     component_clip: float = 5.0
 
 
@@ -124,11 +114,20 @@ class IntrinsicRewardGenerator:
             "survival": _RewardScaler(clamp_value=config.component_clip),
             "explore": _RewardScaler(clamp_value=config.component_clip),
         }
+        self._default_reward_lambdas: dict[str, float] = {
+            "comp": 0.0,
+            "emp": 0.0,
+            "safety": 0.0,
+            "survival": 0.0,
+            "explore": 0.0,
+        }
 
     def get_novelty(
         self,
         predicted_latents: Sequence[torch.Tensor],
         predicted_observations: Sequence[torch.distributions.Distribution] | None,
+        *,
+        novelty_mix: Sequence[float] | None = None,
     ) -> torch.Tensor:
         """Compute epistemic novelty using ensemble disagreement.
 
@@ -137,12 +136,15 @@ class IntrinsicRewardGenerator:
                 dynamics ensemble.
             predicted_observations: Optional decoded observation distributions
                 corresponding to ``predicted_latents``.
+            novelty_mix: Optional latent/decoded blend for the ensemble metric.
 
         Returns:
             Tensor containing the normalized novelty estimate per batch item.
         """
 
-        raw_novelty = self.novelty_metric(predicted_latents, predicted_observations)
+        raw_novelty = self.novelty_metric(
+            predicted_latents, predicted_observations, novelty_mix=novelty_mix
+        )
         return self.novelty_calculator(raw_novelty)
 
     def get_safety(self, observation_entropy: torch.Tensor) -> torch.Tensor:
@@ -205,7 +207,8 @@ class IntrinsicRewardGenerator:
         """Aggregate individual motivational signals into a single reward.
 
         Args:
-            temporal_state: Output dictionary from :class:`TemporalSelfModule`.
+            temporal_state: Output dictionary from :class:`TemporalSelfModule`
+                containing ``reward_lambdas`` and optional competence traces.
             novelty_batch: Epistemic novelty estimates for the current batch.
             observation_entropy: Entropy of the agent's observations.
             action: Actions sampled by the policy.
@@ -239,6 +242,14 @@ class IntrinsicRewardGenerator:
                         r_comp = r_comp.expand(action.shape[0])
                     else:
                         r_comp = r_comp[: action.shape[0]]
+        if temporal_state is None:
+            lambdas = self._default_reward_lambdas
+        else:
+            reward_entry = temporal_state.get("reward_lambdas")
+            if isinstance(reward_entry, dict):
+                lambdas = reward_entry
+            else:
+                lambdas = self._default_reward_lambdas
         r_emp = self.empowerment_estimator(action, latent)
         r_safe = self.get_safety(observation_entropy)
         r_survival = self.get_survival(self_state).to(device=action.device)
@@ -264,12 +275,17 @@ class IntrinsicRewardGenerator:
             "survival": self._scalers["survival"](r_survival),
             "explore": r_explore,
         }
+        lambda_comp = float(lambdas.get("comp", 0.0))
+        lambda_emp = float(lambdas.get("emp", 0.0))
+        lambda_safety = float(lambdas.get("safety", 0.0))
+        lambda_survival = float(lambdas.get("survival", 0.0))
+        lambda_explore = float(lambdas.get("explore", 0.0))
         intrinsic = (
-            self.config.lambda_comp * normalized["competence"]
-            + self.config.lambda_emp * normalized["empowerment"]
-            + self.config.lambda_safety * normalized["safety"]
-            + self.config.lambda_survival * normalized["survival"]
-            + self.config.lambda_explore * normalized["explore"]
+            lambda_comp * normalized["competence"]
+            + lambda_emp * normalized["empowerment"]
+            + lambda_safety * normalized["safety"]
+            + lambda_survival * normalized["survival"]
+            + lambda_explore * normalized["explore"]
         )
         if return_components:
             raw = {

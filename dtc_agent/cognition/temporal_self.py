@@ -20,6 +20,21 @@ class TemporalSelfConfig:
     alpha_fast: float = 0.3
     alpha_slow: float = 0.01
     anxiety_penalty: float = 0.1
+    lambda_comp_base: float = 1.0
+    lambda_comp_bored: float = 0.1
+    lambda_emp_base: float = 0.5
+    lambda_safety_base: float = 0.5
+    lambda_safety_anxious: float = 2.0
+    lambda_survival_base: float = 0.1
+    lambda_explore_base: float = 0.65
+    lambda_explore_bored: float = 2.0
+    lambda_explore_anxious: float = 0.1
+    novelty_mix_latent_base: float = 0.5
+    novelty_mix_decoded_base: float = 0.5
+    novelty_mix_latent_bored: float = 0.8
+    novelty_mix_decoded_bored: float = 0.2
+    novelty_mix_latent_learning: float = 0.3
+    novelty_mix_decoded_learning: float = 0.7
 
 
 class TemporalSelfModule(nn.Module):
@@ -79,14 +94,17 @@ class TemporalSelfModule(nn.Module):
         dtype = dtype or self.ema_fast.dtype
         zeros_field = torch.zeros(batch_size, self.field_dim, device=device, dtype=dtype)
         r_comp = torch.zeros(batch_size, device=device, dtype=dtype)
+        default_mode = "STARTING"
         return {
             "field_tensor": zeros_field,
             "R_comp": r_comp,
-            "cognitive_mode": "STARTING",
+            "cognitive_mode": default_mode,
             "stimulus_deficit": 0.0,
             "stimulus_level": float(self.stimulus_level.detach().item()),
             "stimulus_baseline_value": float(self.stimulus_baseline.detach().item()),
             "learning_rate_scale": 1.0,
+            "reward_lambdas": self._reward_lambdas_for_mode(default_mode),
+            "novelty_mix": self._novelty_mix_for_mode(default_mode),
         }
 
     def forward(
@@ -173,6 +191,8 @@ class TemporalSelfModule(nn.Module):
                 ),
                 dim=-1,
             )
+            reward_lambdas = self._reward_lambdas_for_mode(cognitive_mode)
+            novelty_mix = self._novelty_mix_for_mode(cognitive_mode)
 
         return {
             "field_tensor": field_tensor,
@@ -182,4 +202,56 @@ class TemporalSelfModule(nn.Module):
             "stimulus_level": stimulus_level_value,
             "stimulus_baseline_value": baseline_val,
             "learning_rate_scale": lr_scale,
+            "reward_lambdas": reward_lambdas,
+            "novelty_mix": novelty_mix,
         }
+
+    def _reward_lambdas_for_mode(self, cognitive_mode: str) -> dict[str, float]:
+        """Derive dynamic reward weights from the current cognitive mode."""
+
+        mode = cognitive_mode.upper()
+        lambda_comp = float(self.config.lambda_comp_base)
+        lambda_explore = float(self.config.lambda_explore_base)
+        lambda_safety = float(self.config.lambda_safety_base)
+
+        if mode == "BORED":
+            lambda_comp = float(self.config.lambda_comp_bored)
+            lambda_explore = float(self.config.lambda_explore_bored)
+        elif mode == "ANXIOUS":
+            lambda_explore = float(self.config.lambda_explore_anxious)
+            lambda_safety = float(self.config.lambda_safety_anxious)
+
+        return {
+            "comp": lambda_comp,
+            "explore": lambda_explore,
+            "safety": lambda_safety,
+            "emp": float(self.config.lambda_emp_base),
+            "survival": float(self.config.lambda_survival_base),
+        }
+
+    def _novelty_mix_for_mode(self, cognitive_mode: str) -> list[float]:
+        """Blend latent/decoded novelty contributions based on cognitive mode."""
+
+        mode = cognitive_mode.upper()
+        latent_weight = float(self.config.novelty_mix_latent_base)
+        decoded_weight = float(self.config.novelty_mix_decoded_base)
+
+        if mode == "BORED":
+            latent_weight = float(self.config.novelty_mix_latent_bored)
+            decoded_weight = float(self.config.novelty_mix_decoded_bored)
+        elif mode == "LEARNING":
+            latent_weight = float(self.config.novelty_mix_latent_learning)
+            decoded_weight = float(self.config.novelty_mix_decoded_learning)
+
+        return self._normalize_mix(latent_weight, decoded_weight)
+
+    @staticmethod
+    def _normalize_mix(latent_weight: float, decoded_weight: float) -> list[float]:
+        """Ensure novelty mix weights are non-negative and normalized."""
+
+        latent = max(0.0, float(latent_weight))
+        decoded = max(0.0, float(decoded_weight))
+        total = latent + decoded
+        if total <= 0.0:
+            return [0.5, 0.5]
+        return [latent / total, decoded / total]

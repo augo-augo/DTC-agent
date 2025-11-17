@@ -629,7 +629,15 @@ class TrainingLoop:
                 latent_state = broadcast.mean(dim=1)
                 predictions = self.world_model.predict_next_latents(latent_state, action)
                 decoded = self.world_model.decode_predictions(predictions)
-                novelty = self.reward.get_novelty(predictions, decoded).to(self.device)
+                novelty_mix = None
+                if (
+                    self.current_temporal_state is not None
+                    and "novelty_mix" in self.current_temporal_state
+                ):
+                    novelty_mix = self.current_temporal_state["novelty_mix"]
+                novelty = self.reward.get_novelty(
+                    predictions, decoded, novelty_mix=novelty_mix
+                ).to(self.device)
                 observation_entropy = estimate_observation_entropy(observation)
 
                 if not torch.isfinite(novelty).all():
@@ -1237,7 +1245,10 @@ class TrainingLoop:
                             for idx, pred in enumerate(predictions)
                         ]
                     decoded = self.world_model.decode_predictions(predictions, use_frozen=False)
-                    novelty = self.reward.get_novelty(predictions, decoded)
+                    novelty_mix = dream_temporal_state.get("novelty_mix")
+                    novelty = self.reward.get_novelty(
+                        predictions, decoded, novelty_mix=novelty_mix
+                    )
                     if self._step_count % 100 == 0:
                         print(f"\n[Dream Novelty Diagnostic at step {self._step_count}]")
                         print(

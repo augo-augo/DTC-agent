@@ -16,7 +16,8 @@ Both files expose the same keys:
 | `decoder` | Parameters for the deconvolutional `SharedDecoder` (channel stack, activations, variance controls). |
 | `dynamics` | Dimensions for each ensemble dynamics member. |
 | `workspace` | Global workspace routing weights, broadcast count, progress momentum, UCB exploration factors, and action cost scaling. |
-| `reward` | Coefficients driving competence/empowerment/safety signals. |
+| `temporal_self` | Cognitive-state tracker parameters plus dynamic reward and novelty modulation ranges. |
+| `reward` | Safety/novelty thresholds and per-component normalization clamps for intrinsic reward processing. |
 | `empowerment` | InfoNCE empowerment estimator dimensions, queue depth, and temperature. |
 | `episodic_memory` | Capacity and key dimensionality for the FAISS-backed episodic buffer. |
 | `rollout_capacity` | Number of transitions retained in the replay buffer. |
@@ -48,7 +49,7 @@ values:
 python -m dtc_agent.training \
   --config configs/testing.yaml \
   --override encoder.slot_dim=48 \
-  --override reward.lambda_emp=0.4 \
+  --override temporal_self.lambda_emp_base=0.4 \
   --override empowerment.temperature=0.05
 ```
 

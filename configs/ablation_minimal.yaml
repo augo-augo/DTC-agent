@@ -38,10 +38,6 @@ workspace:
 reward:
   novelty_high: 10.0           # Disabled anxiety penalty
   safety_entropy_floor: 0.1
-  lambda_comp: 2.0             # Double weight
-  lambda_emp: 0.3              # Slightly increased
-  lambda_safety: 0.2           # Slightly increased
-  lambda_explore: 0.0          # DISABLED for ablation
   component_clip: 5.0
 
 temporal_self:
@@ -53,6 +49,21 @@ temporal_self:
   alpha_fast: 0.3
   alpha_slow: 0.01
   anxiety_penalty: 0.1         # Minimal
+  lambda_comp_base: 2.0
+  lambda_comp_bored: 0.2
+  lambda_emp_base: 0.3
+  lambda_safety_base: 0.2
+  lambda_safety_anxious: 0.6
+  lambda_survival_base: 0.0
+  lambda_explore_base: 0.0
+  lambda_explore_bored: 0.0
+  lambda_explore_anxious: 0.0
+  novelty_mix_latent_base: 0.5
+  novelty_mix_decoded_base: 0.5
+  novelty_mix_latent_bored: 0.8
+  novelty_mix_decoded_bored: 0.2
+  novelty_mix_latent_learning: 0.3
+  novelty_mix_decoded_learning: 0.7
 
 empowerment:
   latent_dim: 64

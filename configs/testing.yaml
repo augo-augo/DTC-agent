@@ -35,10 +35,6 @@ workspace:
 reward:
   novelty_high: 1.0
   safety_entropy_floor: 0.2
-  lambda_comp: 0.7
-  lambda_emp: 0.3
-  lambda_safety: 0.3
-  lambda_explore: 0.5
 
 temporal_self:
   stimulus_history_window: 250
@@ -49,6 +45,21 @@ temporal_self:
   alpha_fast: 0.2
   alpha_slow: 0.01
   anxiety_penalty: 0.2
+  lambda_comp_base: 0.7
+  lambda_comp_bored: 0.1
+  lambda_emp_base: 0.3
+  lambda_safety_base: 0.3
+  lambda_safety_anxious: 1.5
+  lambda_survival_base: 0.0
+  lambda_explore_base: 0.5
+  lambda_explore_bored: 1.5
+  lambda_explore_anxious: 0.1
+  novelty_mix_latent_base: 0.5
+  novelty_mix_decoded_base: 0.5
+  novelty_mix_latent_bored: 0.8
+  novelty_mix_decoded_bored: 0.2
+  novelty_mix_latent_learning: 0.3
+  novelty_mix_decoded_learning: 0.7
 
 empowerment:
   latent_dim: 32

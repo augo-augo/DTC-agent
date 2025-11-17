@@ -95,6 +95,7 @@ def jensen_shannon_divergence(
 def ensemble_epistemic_novelty(
     predicted_latents: Sequence[torch.Tensor],
     decoded_distributions: Sequence[torch.distributions.Distribution] | None = None,
+    novelty_mix: Sequence[float] | None = None,
 ) -> torch.Tensor:
     """Combine latent and decoded disagreement into a unified novelty signal.
 
@@ -104,6 +105,8 @@ def ensemble_epistemic_novelty(
             produced from ``predicted_latents``. When provided the mean
             disagreement between decoded predictions is incorporated into the
             final metric.
+        novelty_mix: Optional pair of weights blending latent and decoded
+            disagreement contributions.
 
     Returns:
         Per-batch tensor capturing epistemic uncertainty. Values are lower
@@ -139,7 +142,24 @@ def ensemble_epistemic_novelty(
     if decoded_disagreement is None:
         combined = latent_disagreement
     else:
-        combined = 0.5 * latent_disagreement + 0.5 * decoded_disagreement
+        if novelty_mix is None:
+            mix_latent, mix_decoded = 0.5, 0.5
+        else:
+            mix = tuple(novelty_mix)
+            if len(mix) < 2:
+                mix_latent, mix_decoded = 0.5, 0.5
+            else:
+                mix_latent = float(mix[0])
+                mix_decoded = float(mix[1])
+        mix_latent = max(0.0, mix_latent)
+        mix_decoded = max(0.0, mix_decoded)
+        total = mix_latent + mix_decoded
+        if total <= 0.0:
+            mix_latent = mix_decoded = 0.5
+            total = 1.0
+        mix_latent /= total
+        mix_decoded /= total
+        combined = mix_latent * latent_disagreement + mix_decoded * decoded_disagreement
 
     return combined.clamp_min(0.01)
 

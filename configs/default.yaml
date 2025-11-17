@@ -36,11 +36,6 @@ workspace:
 reward:
   novelty_high: 2.0
   safety_entropy_floor: 0.1
-  lambda_comp: 1.0      # Reduced to let raw novelty lead curiosity
-  lambda_emp: 0.5       # Increased from 0.3 to boost drive for influence
-  lambda_safety: 0.5    # Increased from 0.15 to more strongly penalize "dark room"
-  lambda_survival: 0.1
-  lambda_explore: 0.65  # Further increased to reward raw novelty directly
   component_clip: 3.0
 
 temporal_self:
@@ -52,6 +47,21 @@ temporal_self:
   alpha_fast: 0.3
   alpha_slow: 0.02
   anxiety_penalty: 0.1
+  lambda_comp_base: 1.0
+  lambda_comp_bored: 0.1
+  lambda_emp_base: 0.5
+  lambda_safety_base: 0.5
+  lambda_safety_anxious: 2.0
+  lambda_survival_base: 0.1
+  lambda_explore_base: 0.65
+  lambda_explore_bored: 2.0
+  lambda_explore_anxious: 0.1
+  novelty_mix_latent_base: 0.5
+  novelty_mix_decoded_base: 0.5
+  novelty_mix_latent_bored: 0.8
+  novelty_mix_decoded_bored: 0.2
+  novelty_mix_latent_learning: 0.3
+  novelty_mix_decoded_learning: 0.7
 
 empowerment:
   latent_dim: 64
