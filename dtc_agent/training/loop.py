@@ -652,6 +652,8 @@ class TrainingLoop:
                     print(f"  novelty stats: min={min_val}, max={max_val}, mean={mean_val}")
                     novelty = sanitize_tensor(novelty, replacement=0.0)
 
+                epistemic_novelty = novelty
+
                 if not torch.isfinite(observation_entropy).all():
                     finite = observation_entropy[torch.isfinite(observation_entropy)]
                     if finite.numel() > 0:
