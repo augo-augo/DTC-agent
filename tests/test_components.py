@@ -13,14 +13,19 @@ def test_compute_gae_matches_manual_calculation() -> None:
 
     advantages, returns = loop._compute_gae(rewards, values, next_value)
 
-    expected_advantages = torch.tensor(
-        [[5.7974653], [5.0010262], [3.0920000]]
-    )
-    expected_returns = torch.tensor(
-        [[6.2974653], [5.6010261], [3.7920001]]
-    )
-    assert torch.allclose(advantages, expected_advantages, atol=1e-5)
-    assert torch.allclose(returns, expected_returns, atol=1e-5)
+    gamma = config.discount_gamma
+    lam = config.gae_lambda
+    values_ext = torch.cat([values, next_value.unsqueeze(0)], dim=0)
+    manual_advantages = torch.zeros_like(rewards)
+    running = torch.zeros(rewards.size(1))
+    for t in reversed(range(rewards.size(0))):
+        delta = rewards[t] + gamma * values_ext[t + 1] - values_ext[t]
+        running = delta + gamma * lam * running
+        manual_advantages[t] = running
+    manual_returns = manual_advantages + values
+
+    assert torch.allclose(advantages, manual_advantages, atol=1e-6)
+    assert torch.allclose(returns, manual_returns, atol=1e-6)
 
 
 def test_running_mean_std_and_reward_normalizer_track_statistics() -> None:

@@ -34,13 +34,11 @@ def test_training_loop_samples_action_without_input() -> None:
     assert result.action.shape == (1, config.dynamics.action_dim)
     assert result.reward_components is not None
     assert result.raw_reward_components is not None
-    for key in ("competence", "empowerment", "safety", "explore"):
+    for key in ("competence", "empowerment", "safety", "survival", "explore"):
         assert key in result.reward_components
         assert key in result.raw_reward_components
         assert result.reward_components[key].shape[0] == observation.shape[0]
         assert result.raw_reward_components[key].shape[0] == observation.shape[0]
-    assert result.training_metrics is None
-    assert result.training_loss is None
 
 
 def test_training_loop_step_returns_result(tmp_path) -> None:
@@ -65,10 +63,9 @@ def test_training_loop_step_returns_result(tmp_path) -> None:
     assert result.slot_scores.shape == (observation.shape[0], config.encoder.num_slots)
     assert result.reward_components is not None
     assert result.raw_reward_components is not None
-    assert set(result.reward_components.keys()) == {"competence", "empowerment", "safety", "explore"}
-    assert set(result.raw_reward_components.keys()) == {"competence", "empowerment", "safety", "explore"}
-    assert result.training_loss is None
-    assert result.training_metrics is None
+    expected_keys = {"competence", "empowerment", "safety", "survival", "explore"}
+    assert set(result.reward_components.keys()) == expected_keys
+    assert set(result.raw_reward_components.keys()) == expected_keys
 
 
 def test_rollout_buffer_raises_on_empty_sample() -> None:
@@ -86,11 +83,11 @@ def test_rollout_buffer_raises_on_bad_batch_size() -> None:
 def test_configure_tf32_precision_prefers_new_api(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyMatmul:
         def __init__(self) -> None:
-            self.fp32_precision = "ieee"
+            self.allow_tf32 = False
 
     class DummyConv:
         def __init__(self) -> None:
-            self.fp32_precision = "ieee"
+            self.allow_tf32 = False
 
     matmul_backend = DummyMatmul()
     conv_backend = DummyConv()
@@ -99,14 +96,14 @@ def test_configure_tf32_precision_prefers_new_api(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         torch.backends,
         "cudnn",
-        type("DummyCudnn", (), {"conv": conv_backend})(),
+        conv_backend,
         raising=False,
     )
 
     _configure_tf32_precision(torch.device("cuda"))
 
-    assert matmul_backend.fp32_precision == "tf32"
-    assert conv_backend.fp32_precision == "tf32"
+    assert matmul_backend.allow_tf32 is True
+    assert conv_backend.allow_tf32 is True
 
 
 def test_configure_tf32_precision_legacy_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

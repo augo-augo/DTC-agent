@@ -266,8 +266,6 @@ class StepResult:
     slot_scores: torch.Tensor
     reward_components: dict[str, torch.Tensor] | None = None
     raw_reward_components: dict[str, torch.Tensor] | None = None
-    training_loss: float | None = None
-    training_metrics: dict[str, float] | None = None
     competence_breakdown: dict[str, torch.Tensor] | None = None
     epistemic_novelty: torch.Tensor | None = None
     real_action_entropy: float | None = None
@@ -311,6 +309,7 @@ class TrainingConfig:
     adaptive_entropy: bool = True
     adaptive_entropy_target: float = 1.0
     adaptive_entropy_scale: float = 5.0
+    dream_noise_ratio: float = 0.25
     temporal_self: TemporalSelfConfig = field(default_factory=TemporalSelfConfig)
 
     @property
@@ -701,9 +700,6 @@ class TrainingLoop:
                 next_observation=next_observation,
                 self_state=state_tensor,
             )
-        train_loss: float | None = None
-        training_metrics: dict[str, float] | None = None
-
         return StepResult(
             action=action.detach(),
             intrinsic_reward=intrinsic.detach(),
@@ -712,8 +708,6 @@ class TrainingLoop:
             slot_scores=scores.detach(),
             reward_components=reward_components,
             raw_reward_components=raw_reward_components,
-            training_loss=train_loss,
-            training_metrics=training_metrics,
             competence_breakdown=competence_breakdown,
             epistemic_novelty=epistemic_novelty.detach() if epistemic_novelty is not None else None,
             real_action_entropy=current_real_entropy,
@@ -1150,6 +1144,18 @@ class TrainingLoop:
             else value
             for key, value in latents.items()
         }
+
+        if self.config.dream_noise_ratio > 0.0:
+            z_self = initial_latents.get("z_self")
+            slots = initial_latents.get("slots")
+            if isinstance(z_self, torch.Tensor) and isinstance(slots, torch.Tensor):
+                batch_size = z_self.shape[0]
+                num_noise = int(batch_size * float(self.config.dream_noise_ratio))
+                if num_noise > 0:
+                    noise_z = torch.randn_like(z_self[:num_noise])
+                    noise_slots = torch.randn_like(slots[:num_noise])
+                    z_self[:num_noise] = noise_z
+                    slots[:num_noise] = noise_slots
         memory_context = self._get_memory_context(initial_latents["z_self"]).detach()
         dream_self_state: torch.Tensor | None = None
         if self._latest_self_state is not None:

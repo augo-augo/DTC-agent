@@ -199,7 +199,7 @@ class WM_Ensemble(nn.Module):
         # 2. Decode using *frozen* head
         predicted_obs_dists = [self.frozen_decoder(z) for z in priors_z]
         # 3. Calculate JSD
-        N_epi = jensen_shannon_divergence(predicted_obs_dists)
+        N_epi = decoder_variance_novelty(predicted_obs_dists)
         return N_epi
     
     def get_elbo_loss(self, batch):

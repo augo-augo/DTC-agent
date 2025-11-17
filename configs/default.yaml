@@ -104,3 +104,4 @@ device: cuda
 adaptive_entropy: true
 adaptive_entropy_target: 1.2
 adaptive_entropy_scale: 6.0
+dream_noise_ratio: 0.25

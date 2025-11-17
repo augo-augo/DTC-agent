@@ -43,12 +43,11 @@ class TemporalSelfModule(nn.Module):
     def __init__(self, config: TemporalSelfConfig) -> None:
         super().__init__()
         self.config = config
-        self.field_dim = 4  # ema_fast, ema_slow, baseline, deficit
+        self.field_dim = 3  # ema_fast, ema_slow, deficit
         window = max(1, int(config.stimulus_history_window))
         self.register_buffer("ema_fast", torch.tensor(0.0))
         self.register_buffer("ema_slow", torch.tensor(0.0))
         self.register_buffer("stimulus_level", torch.tensor(0.0))
-        self.register_buffer("stimulus_baseline", torch.tensor(0.0))
         self.register_buffer("_ema_initialized", torch.tensor(0.0))
         self.stimulus_history: Deque[float] = deque(maxlen=window)
         self._last_breakdown: dict[str, torch.Tensor] | None = None
@@ -64,7 +63,6 @@ class TemporalSelfModule(nn.Module):
             "ema_fast": self.ema_fast.detach().clone(),
             "ema_slow": self.ema_slow.detach().clone(),
             "stimulus_level": self.stimulus_level.detach().clone(),
-            "stimulus_baseline": self.stimulus_baseline.detach().clone(),
             "_ema_initialized": self._ema_initialized.detach().clone(),
             "stimulus_history": deque(self.stimulus_history, maxlen=self.stimulus_history.maxlen),
         }
@@ -76,7 +74,6 @@ class TemporalSelfModule(nn.Module):
         self.ema_fast.copy_(snapshot["ema_fast"].to(device=device))
         self.ema_slow.copy_(snapshot["ema_slow"].to(device=device))
         self.stimulus_level.copy_(snapshot["stimulus_level"].to(device=device))
-        self.stimulus_baseline.copy_(snapshot["stimulus_baseline"].to(device=device))
         self._ema_initialized.copy_(snapshot["_ema_initialized"].to(device=device))
         history: Deque[float] = snapshot["stimulus_history"]
         self.stimulus_history = deque(history, maxlen=self.stimulus_history.maxlen)
@@ -101,7 +98,6 @@ class TemporalSelfModule(nn.Module):
             "cognitive_mode": default_mode,
             "stimulus_deficit": 0.0,
             "stimulus_level": float(self.stimulus_level.detach().item()),
-            "stimulus_baseline_value": float(self.stimulus_baseline.detach().item()),
             "learning_rate_scale": 1.0,
             "reward_lambdas": self._reward_lambdas_for_mode(default_mode),
             "novelty_mix": self._novelty_mix_for_mode(default_mode),
@@ -131,7 +127,6 @@ class TemporalSelfModule(nn.Module):
                 self.ema_fast.copy_(init_value)
                 self.ema_slow.copy_(init_value)
                 self.stimulus_level.copy_(init_value)
-                self.stimulus_baseline.copy_(init_value)
                 self._ema_initialized.fill_(1.0)
 
             ema_fast_prev = self.ema_fast.clone()
@@ -153,7 +148,6 @@ class TemporalSelfModule(nn.Module):
                 baseline_val = sum(self.stimulus_history) / len(self.stimulus_history)
             else:
                 baseline_val = float(stimulus_level.item())
-            self.stimulus_baseline.fill_(baseline_val)
 
             progress = ema_slow_prev - self.ema_fast
             anxiety = self.config.anxiety_penalty * torch.relu(self.ema_fast - ema_slow_prev)
@@ -182,12 +176,14 @@ class TemporalSelfModule(nn.Module):
             lr_scale = 1.0 + stimulus_surplus * self.config.learning_rate_scale
             lr_scale = max(1.0, min(self.config.learning_rate_scale, lr_scale))
 
+            deficit_tensor = torch.full(
+                (batch_size,), stimulus_deficit, device=device, dtype=dtype
+            )
             field_tensor = torch.stack(
                 (
                     self.ema_fast.to(dtype=dtype).expand(batch_size),
                     self.ema_slow.to(dtype=dtype).expand(batch_size),
-                    self.stimulus_baseline.to(dtype=dtype).expand(batch_size),
-                    torch.full((batch_size,), stimulus_deficit, device=device, dtype=dtype),
+                    deficit_tensor,
                 ),
                 dim=-1,
             )
@@ -200,7 +196,6 @@ class TemporalSelfModule(nn.Module):
             "cognitive_mode": cognitive_mode,
             "stimulus_deficit": stimulus_deficit,
             "stimulus_level": stimulus_level_value,
-            "stimulus_baseline_value": baseline_val,
             "learning_rate_scale": lr_scale,
             "reward_lambdas": reward_lambdas,
             "novelty_mix": novelty_mix,

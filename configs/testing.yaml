@@ -96,3 +96,5 @@ world_model_coef: 1.0
 
 world_model_ensemble: 3
 device: cpu
+
+dream_noise_ratio: 0.25
