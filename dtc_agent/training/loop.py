@@ -570,7 +570,18 @@ class TrainingLoop:
         try:
             with torch.no_grad():
                 with self._autocast_ctx():
-                    latents = self._call_with_fallback("world_model", observation)
+                    amp_ctx_disable = nullcontext()
+                    if self.autocast_enabled and self.device.type == "cuda":
+                        try:
+                            amp_ctx_disable = torch.amp.autocast(
+                                device_type=self.device.type, enabled=False
+                            )
+                        except AttributeError:  # pragma: no cover - legacy fallback
+                            from torch.cuda.amp import autocast as legacy_autocast
+
+                            amp_ctx_disable = legacy_autocast(enabled=False)
+                    with amp_ctx_disable:
+                        latents = self._call_with_fallback("world_model", observation)
                     memory_context = self._get_memory_context(latents["z_self"])
                 if action is not None:
                     action_for_routing = action.to(self.device, non_blocking=True)
