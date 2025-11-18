@@ -169,6 +169,7 @@ def _actor_loop(
     metrics_queue: Queue,
     seed: int,
 ) -> None:
+    device_index: int | None = None
     if runtime_device.type == "cuda":
         device_index = runtime_device.index
         if device_index is None:
@@ -204,6 +205,8 @@ def _actor_loop(
                         self_state=self_state_vec if self_state_vec.numel() > 0 else None,
                         train=False,
                     )
+                if device_index is not None:
+                    torch.cuda.synchronize(device_index)
                 policy_result = _detach_step_result(policy_result)
             env_action = _select_env_action(policy_result.action, env.action_space.n)
             next_observation, env_reward, terminated, info = env.step(env_action)
