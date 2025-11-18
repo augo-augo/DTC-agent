@@ -100,3 +100,7 @@ world_model_ensemble: 3
 device: cpu
 dream_noise_base_ratio: 0.1
 dream_counterfactual_base_rate: 0.1
+base_dream_horizon: 6
+max_horizon_multiplier: 8.0
+boredom_threshold: 0.5
+horizon_scaling_mode: sigmoid

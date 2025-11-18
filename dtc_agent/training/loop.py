@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from contextlib import nullcontext
+import math
 from typing import Any, Callable, ContextManager, ParamSpec, Protocol, TypeVar, cast
 
 import torch
@@ -311,6 +312,10 @@ class TrainingConfig:
     adaptive_entropy_scale: float = 5.0
     dream_noise_base_ratio: float = 0.1
     dream_counterfactual_base_rate: float = 0.1
+    base_dream_horizon: int = 15
+    max_horizon_multiplier: float = 8.0
+    boredom_threshold: float = 0.5
+    horizon_scaling_mode: str = "sigmoid"
     temporal_self: TemporalSelfConfig = field(default_factory=TemporalSelfConfig)
 
     @property
@@ -439,6 +444,18 @@ class TrainingLoop:
             from torch.cuda.amp import autocast as legacy_autocast  # type: ignore[attr-defined]
 
             return legacy_autocast()
+
+    def _compute_horizon_multiplier(self, normalized_deficit: float) -> float:
+        normalized = max(0.0, min(1.0, float(normalized_deficit)))
+        max_multiplier = max(1.0, float(self.config.max_horizon_multiplier))
+        mode = str(getattr(self.config, "horizon_scaling_mode", "sigmoid")).lower()
+        if mode == "linear":
+            scaled = normalized
+        else:
+            k = 10.0
+            midpoint = 0.5
+            scaled = 1.0 / (1.0 + math.exp(-k * (normalized - midpoint)))
+        return 1.0 + (max_multiplier - 1.0) * scaled
 
     def _call_with_fallback(
         self, attr: str, *args: P.args, **kwargs: P.kwargs
@@ -1153,7 +1170,15 @@ class TrainingLoop:
         dynamic_counterfactual_rate = min(1.0, max(0.0, dynamic_counterfactual_rate))
 
         chunk_size = max(1, self.config.dream_chunk_size)
-        num_chunks = max(1, self.config.num_dream_chunks)
+        base_horizon = max(chunk_size, int(self.config.base_dream_horizon))
+        if real_stimulus_deficit <= self.config.boredom_threshold:
+            horizon_multiplier = 1.0
+        else:
+            denom = max(1e-6, 1.0 - float(self.config.boredom_threshold))
+            normalized_deficit = (real_stimulus_deficit - float(self.config.boredom_threshold)) / denom
+            horizon_multiplier = self._compute_horizon_multiplier(normalized_deficit)
+        dream_horizon = max(chunk_size, int(round(base_horizon * horizon_multiplier)))
+        num_chunks = max(1, math.ceil(dream_horizon / chunk_size))
 
         initial_latents = {
             key: value.detach().clone()
@@ -1192,6 +1217,7 @@ class TrainingLoop:
         intrinsic_terms = []
         explore_terms = []
         raw_explore_terms = []
+        dream_novelty_values: list[float] = []
 
         dream_actions = []
         counterfactual_rates: list[torch.Tensor] = []
@@ -1291,6 +1317,8 @@ class TrainingLoop:
                     predicted_obs = decoded[0].rsample()
                     observation_entropy = estimate_observation_entropy(predicted_obs)
 
+                    dream_novelty_values.append(float(novelty.detach().mean().item()))
+
                     if not torch.isfinite(novelty).all() or not torch.isfinite(observation_entropy).all():
                         print(
                             f"[DREAM ERROR at step {self._step_count}] Non-finite dream values detected, skipping this dream chunk"
@@ -1314,6 +1342,10 @@ class TrainingLoop:
                                     "dream/explore_raw",
                                     "dream/explore_raw_min",
                                     "dream/explore_raw_max",
+                                    "dream/avg_novelty",
+                                    "dream/max_novelty_streak",
+                                    "dream/horizon",
+                                    "dream/horizon_multiplier",
                                 ]
                             },
                         )
@@ -1440,6 +1472,21 @@ class TrainingLoop:
         else:
             latent_drift_tensor = torch.tensor([0.0], device=self.device)
 
+        if dream_novelty_values:
+            avg_novelty_value = float(sum(dream_novelty_values) / len(dream_novelty_values))
+            novelty_threshold = float(getattr(self.config.reward, "novelty_high", 1.0))
+            current_streak = 0
+            max_novelty_streak = 0
+            for value in dream_novelty_values:
+                if value >= novelty_threshold:
+                    current_streak += 1
+                    max_novelty_streak = max(max_novelty_streak, current_streak)
+                else:
+                    current_streak = 0
+        else:
+            avg_novelty_value = 0.0
+            max_novelty_streak = 0
+
         dreaming_metrics = {
             "dream/intrinsic_reward": intrinsic_stack.mean().detach(),
             "dream/competence": competence_stack.mean().detach(),
@@ -1457,6 +1504,14 @@ class TrainingLoop:
             "dream/actor_boost": torch.tensor(actor_boost, device=self.device),
             "dream/stimulus_deficit": torch.tensor(
                 final_stimulus_deficit, device=self.device
+            ),
+            "dream/avg_novelty": torch.tensor(avg_novelty_value, device=self.device),
+            "dream/max_novelty_streak": torch.tensor(
+                float(max_novelty_streak), device=self.device
+            ),
+            "dream/horizon": torch.tensor(float(dream_horizon), device=self.device),
+            "dream/horizon_multiplier": torch.tensor(
+                float(horizon_multiplier), device=self.device
             ),
             "dream/action_divergence": divergence_values.mean().detach(),
             "dream/action_divergence_std": divergence_values.std(unbiased=False).detach(),

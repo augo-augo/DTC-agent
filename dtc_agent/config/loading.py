@@ -99,6 +99,12 @@ def load_training_config(path: str | Path, overrides: Iterable[str] | None = Non
             dream_chunk_size = 5
     if num_dream_chunks is None:
         num_dream_chunks = 1
+    base_dream_horizon = resolved.get(
+        "base_dream_horizon", dream_chunk_size * num_dream_chunks
+    )
+    max_horizon_multiplier = resolved.get("max_horizon_multiplier", 8.0)
+    boredom_threshold = resolved.get("boredom_threshold", 0.5)
+    horizon_scaling_mode = resolved.get("horizon_scaling_mode", "sigmoid")
     discount_gamma = resolved.get("discount_gamma", 0.99)
     gae_lambda = resolved.get("gae_lambda", 0.95)
     entropy_coef = resolved.get("entropy_coef", 0.01)
@@ -141,6 +147,10 @@ def load_training_config(path: str | Path, overrides: Iterable[str] | None = Non
         compile_modules=compile_modules,
         dream_noise_base_ratio=dream_noise_base_ratio,
         dream_counterfactual_base_rate=dream_counterfactual_base_rate,
+        base_dream_horizon=int(base_dream_horizon),
+        max_horizon_multiplier=float(max_horizon_multiplier),
+        boredom_threshold=float(boredom_threshold),
+        horizon_scaling_mode=str(horizon_scaling_mode),
     )
 
 
