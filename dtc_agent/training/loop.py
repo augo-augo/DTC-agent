@@ -462,8 +462,17 @@ class TrainingLoop:
         self, attr: str, *args: P.args, **kwargs: P.kwargs
     ) -> T:
         module = cast(_CallableModule[P, T], getattr(self, attr))
+        amp_ctx = nullcontext()
+        if attr == "world_model" and self.autocast_enabled and self.device.type == "cuda":
+            try:
+                amp_ctx = torch.amp.autocast(device_type=self.device.type, enabled=False)
+            except AttributeError:  # pragma: no cover - legacy AMP
+                from torch.cuda.amp import autocast as legacy_autocast
+
+                amp_ctx = legacy_autocast(enabled=False)
         try:
-            return module(*args, **kwargs)
+            with amp_ctx:
+                return module(*args, **kwargs)
         except Exception as err:
             message = str(err).lower()
             needs_fallback = any(
@@ -488,7 +497,8 @@ class TrainingLoop:
                 _dynamo.reset()
             except Exception:
                 pass
-            return cast(T, original_module(*args, **kwargs))
+            with amp_ctx:
+                return cast(T, original_module(*args, **kwargs))
 
     def step(
         self,
