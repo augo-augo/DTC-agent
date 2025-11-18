@@ -25,7 +25,7 @@ import wandb
 from omegaconf import OmegaConf
 
 from dtc_agent.config import load_training_config
-from dtc_agent.training import TrainingLoop
+from dtc_agent.training import StepResult, TrainingLoop
 from dtc_agent.training.wandb_logger import WandBLogger
 
 torch.autograd.set_detect_anomaly(True)
@@ -55,8 +55,8 @@ def _preprocess_frame(
         tensor = tensor.permute(2, 0, 1)
     elif tensor.shape[0] != target_shape[0]:
         raise ValueError(f"Incompatible observation shape {tensor.shape} for expected {target_shape}")
-    tensor = tensor.to(device=device, dtype=torch.float32, non_blocking=True)
-    if tensor.max() > 1.0:
+    tensor = tensor.to(dtype=torch.float32)
+    if tensor.max().item() > 1.0:
         tensor = tensor / 255.0
     tensor = tensor.unsqueeze(0)
     spatial_size = (target_shape[1], target_shape[2])
@@ -67,7 +67,37 @@ def _preprocess_frame(
             tensor = tensor.repeat(1, target_shape[0], 1, 1)
         else:
             raise ValueError("Unable to match channel count for observation tensor")
-    return tensor.clamp(0.0, 1.0)
+    tensor = tensor.clamp(0.0, 1.0).contiguous()
+    if device.type == "cuda" and tensor.device.type == "cpu":
+        tensor = tensor.pin_memory()
+    return tensor
+
+
+def _detach_step_result(result: StepResult) -> StepResult:
+    def _tensor_to_cpu(value: torch.Tensor) -> torch.Tensor:
+        return value.detach().to("cpu")
+
+    result.action = _tensor_to_cpu(result.action)
+    result.intrinsic_reward = _tensor_to_cpu(result.intrinsic_reward)
+    result.novelty = _tensor_to_cpu(result.novelty)
+    result.observation_entropy = _tensor_to_cpu(result.observation_entropy)
+    result.slot_scores = _tensor_to_cpu(result.slot_scores)
+    if result.epistemic_novelty is not None:
+        result.epistemic_novelty = _tensor_to_cpu(result.epistemic_novelty)
+
+    if result.reward_components is not None:
+        result.reward_components = {
+            name: _tensor_to_cpu(value) for name, value in result.reward_components.items()
+        }
+    if result.raw_reward_components is not None:
+        result.raw_reward_components = {
+            name: _tensor_to_cpu(value) for name, value in result.raw_reward_components.items()
+        }
+    if result.competence_breakdown is not None:
+        result.competence_breakdown = {
+            name: _tensor_to_cpu(value) for name, value in result.competence_breakdown.items()
+        }
+    return result
 
 
 def _compute_self_state(
@@ -156,7 +186,7 @@ def _actor_loop(
             step_count=episode_steps,
             horizon=max_steps,
             state_dim=config.self_state_dim,
-        ).unsqueeze(0).to(runtime_device)
+        ).unsqueeze(0)
         episode_frames = [_frame_to_chw(frame)]
         while not stop_event.is_set():
             with policy_lock:
@@ -166,6 +196,7 @@ def _actor_loop(
                         self_state=self_state_vec if self_state_vec.numel() > 0 else None,
                         train=False,
                     )
+                policy_result = _detach_step_result(policy_result)
             env_action = _select_env_action(policy_result.action, env.action_space.n)
             next_observation, env_reward, terminated, info = env.step(env_action)
             truncated = False
@@ -184,7 +215,7 @@ def _actor_loop(
                 next_episode_steps,
                 max_steps,
                 config.self_state_dim,
-            ).unsqueeze(0).to(runtime_device)
+            ).unsqueeze(0)
             episode_frames.append(_frame_to_chw(next_observation))
             with steps_lock:
                 if shared_state["steps"] >= max_steps:
@@ -326,7 +357,7 @@ def _actor_loop(
                     step_count=episode_steps,
                     horizon=max_steps,
                     state_dim=config.self_state_dim,
-                ).unsqueeze(0).to(runtime_device)
+                ).unsqueeze(0)
                 continue
             observation_tensor = next_tensor
             self_state_vec = next_self_state_vec
