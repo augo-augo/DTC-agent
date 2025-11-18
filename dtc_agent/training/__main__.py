@@ -170,7 +170,13 @@ def _actor_loop(
     seed: int,
 ) -> None:
     if runtime_device.type == "cuda":
-        torch.cuda.set_device(runtime_device)
+        device_index = runtime_device.index
+        if device_index is None:
+            try:
+                device_index = torch.cuda.current_device()
+            except RuntimeError:
+                device_index = 0
+        torch.cuda.set_device(device_index)
     env = crafter.Env()
     try:
         if hasattr(env, "seed"):
