@@ -169,6 +169,8 @@ def _actor_loop(
     metrics_queue: Queue,
     seed: int,
 ) -> None:
+    if runtime_device.type == "cuda":
+        torch.cuda.set_device(runtime_device)
     env = crafter.Env()
     try:
         if hasattr(env, "seed"):
