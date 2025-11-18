@@ -136,6 +136,7 @@ class _SlotAttention(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         b, n, d = inputs.shape
         inputs = self.norm_inputs(inputs)
+        inputs = inputs.contiguous()
         mu = self.slot_mu.expand(b, self.num_slots, -1)
         sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
         slots = mu + sigma * torch.randn_like(mu)
@@ -145,7 +146,7 @@ class _SlotAttention(nn.Module):
 
         for _ in range(self.iters):
             slots_prev = slots
-            slots = self.norm_slots(slots)
+            slots = self.norm_slots(slots).contiguous()
             q = self.project_q(slots)
 
             dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
