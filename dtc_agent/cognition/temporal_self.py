@@ -17,6 +17,8 @@ class TemporalSelfConfig:
     dream_entropy_scale: float = 10.0
     actor_entropy_scale: float = 5.0
     learning_rate_scale: float = 2.0
+    dream_noise_scale: float = 5.0
+    dream_counterfactual_scale: float = 2.0
     alpha_fast: float = 0.3
     alpha_slow: float = 0.01
     anxiety_penalty: float = 0.1

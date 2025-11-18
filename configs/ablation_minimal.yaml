@@ -46,6 +46,8 @@ temporal_self:
   dream_entropy_scale: 1.0     # No boosting
   actor_entropy_scale: 1.0     # No boosting
   learning_rate_scale: 1.0     # No scaling
+  dream_noise_scale: 5.0
+  dream_counterfactual_scale: 2.0
   alpha_fast: 0.3
   alpha_slow: 0.01
   anxiety_penalty: 0.1         # Minimal
@@ -105,4 +107,5 @@ device: cuda
 adaptive_entropy: true
 adaptive_entropy_target: 1.0
 adaptive_entropy_scale: 5.0
-dream_noise_ratio: 0.25
+dream_noise_base_ratio: 0.1
+dream_counterfactual_base_rate: 0.1

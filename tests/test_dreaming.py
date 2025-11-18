@@ -27,7 +27,9 @@ def test_stable_dreaming_outputs_are_finite() -> None:
     observations = torch.rand(batch, *config.encoder.observation_shape)
     latents = loop.world_model(observations)
 
-    dream_loss, actor_loss, critic_loss, metrics = loop._stable_dreaming(latents)
+    dream_loss, actor_loss, critic_loss, metrics = loop._stable_dreaming(
+        latents, real_stimulus_deficit=0.0
+    )
 
     for loss in (dream_loss, actor_loss, critic_loss):
         assert loss.ndim == 0

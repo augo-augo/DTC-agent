@@ -42,6 +42,8 @@ temporal_self:
   dream_entropy_scale: 5.0
   actor_entropy_scale: 2.5
   learning_rate_scale: 1.5
+  dream_noise_scale: 5.0
+  dream_counterfactual_scale: 2.0
   alpha_fast: 0.2
   alpha_slow: 0.01
   anxiety_penalty: 0.2
@@ -96,5 +98,5 @@ world_model_coef: 1.0
 
 world_model_ensemble: 3
 device: cpu
-
-dream_noise_ratio: 0.25
+dream_noise_base_ratio: 0.1
+dream_counterfactual_base_rate: 0.1

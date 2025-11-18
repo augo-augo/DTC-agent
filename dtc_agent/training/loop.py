@@ -309,8 +309,8 @@ class TrainingConfig:
     adaptive_entropy: bool = True
     adaptive_entropy_target: float = 1.0
     adaptive_entropy_scale: float = 5.0
-    dream_noise_ratio: float = 0.25
-    dream_counterfactual_rate: float = 0.1
+    dream_noise_base_ratio: float = 0.1
+    dream_counterfactual_base_rate: float = 0.1
     temporal_self: TemporalSelfConfig = field(default_factory=TemporalSelfConfig)
 
     @property
@@ -1049,8 +1049,11 @@ class TrainingLoop:
                         f"Diversity: {emp_diag['queue_diversity']:.4f}"
                     )
 
+            real_stimulus_deficit = float(
+                temporal_context.get("stimulus_deficit", 0.0)
+            )
             dream_loss, actor_loss, critic_loss, dream_metrics = self._stable_dreaming(
-                latents
+                latents, real_stimulus_deficit
             )
             total_loss = world_model_loss + actor_loss + critic_loss + dream_loss + self_state_loss
 
@@ -1135,7 +1138,20 @@ class TrainingLoop:
     def _stable_dreaming(
         self,
         latents: dict[str, torch.Tensor],
+        real_stimulus_deficit: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        dynamic_noise_ratio = (
+            self.config.dream_noise_base_ratio
+            + real_stimulus_deficit * self.config.temporal_self.dream_noise_scale
+        )
+        dynamic_noise_ratio = min(1.0, max(0.0, dynamic_noise_ratio))
+        dynamic_counterfactual_rate = (
+            self.config.dream_counterfactual_base_rate
+            + real_stimulus_deficit
+            * self.config.temporal_self.dream_counterfactual_scale
+        )
+        dynamic_counterfactual_rate = min(1.0, max(0.0, dynamic_counterfactual_rate))
+
         chunk_size = max(1, self.config.dream_chunk_size)
         num_chunks = max(1, self.config.num_dream_chunks)
 
@@ -1146,12 +1162,12 @@ class TrainingLoop:
             for key, value in latents.items()
         }
 
-        if self.config.dream_noise_ratio > 0.0:
+        if dynamic_noise_ratio > 0.0:
             z_self = initial_latents.get("z_self")
             slots = initial_latents.get("slots")
             if isinstance(z_self, torch.Tensor) and isinstance(slots, torch.Tensor):
                 batch_size = z_self.shape[0]
-                num_noise = int(batch_size * float(self.config.dream_noise_ratio))
+                num_noise = int(batch_size * float(dynamic_noise_ratio))
                 if num_noise > 0:
                     noise_z = torch.randn_like(z_self[:num_noise])
                     noise_slots = torch.randn_like(slots[:num_noise])
@@ -1227,7 +1243,7 @@ class TrainingLoop:
                     mutated_action = sampled_action + action_noise + policy_mutation
                     counterfactual_mask = (
                         torch.rand(sampled_action.shape[0], device=sampled_action.device)
-                        < self.config.dream_counterfactual_rate
+                        < dynamic_counterfactual_rate
                     )
                     wild_action = torch.randn_like(sampled_action) * 2.0
                     executed_action = torch.where(
