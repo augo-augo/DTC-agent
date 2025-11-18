@@ -134,7 +134,20 @@ class _SlotAttention(nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.ndim != 3:
+            raise ValueError("Slot Attention inputs must be [batch, num_inputs, dim]")
+        if inputs.shape[-1] != self.dim:
+            raise ValueError(
+                f"Slot Attention inputs last dimension must equal slot dim ({self.dim})"
+            )
+        if inputs.shape[1] <= 0:
+            raise ValueError("Slot Attention requires at least one input token")
+        if not torch.isfinite(inputs).all():
+            raise ValueError("Slot Attention inputs must be finite (no NaN or Inf values)")
+
         b, n, d = inputs.shape
+        if inputs.device.type == "cuda" and inputs.dtype != torch.float32:
+            inputs = inputs.float()
         inputs = self.norm_inputs(inputs)
         inputs = inputs.contiguous()
         mu = self.slot_mu.expand(b, self.num_slots, -1)
