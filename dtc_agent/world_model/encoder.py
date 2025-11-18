@@ -223,7 +223,7 @@ class SlotAttentionEncoder(nn.Module):
             raise ValueError("observation must be [batch, channels, height, width]")
         features = self.backbone(observation)
         batch, channels, height, width = features.shape
-        flat = features.view(batch, channels, height * width).permute(0, 2, 1)
+        flat = features.view(batch, channels, height * width).permute(0, 2, 1).contiguous()
         flat = self.positional(flat)
         flat = self.pre_slots(flat)
         slots = self.slot_attention(flat)
