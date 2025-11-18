@@ -189,9 +189,22 @@ class SlotAttentionEncoder(nn.Module):
 
         super().__init__()
         self.config = config
+        if config.slot_dim <= 0:
+            raise ValueError(f"slot_dim must be positive, got {config.slot_dim}")
+        if not config.cnn_channels:
+            raise ValueError("cnn_channels must not be empty")
+        if config.cnn_channels[-1] <= 0:
+            raise ValueError(
+                f"cnn_channels last entry must be positive, got {config.cnn_channels[-1]}"
+            )
         c, h, w = config.observation_shape
         self.backbone = _ConvBackbone(c, config.cnn_channels, config.kernel_size)
         feature_dim = config.cnn_channels[-1]
+        if feature_dim != config.slot_dim:
+            raise ValueError(
+                "pre_slots input dimension does not match Slot Attention dim: "
+                f"feature_dim={feature_dim}, slot_dim={config.slot_dim}"
+            )
         self.positional = _PositionalEmbedding(feature_dim, h, w)
         self.pre_slots = nn.Linear(feature_dim, config.slot_dim)
         self.slot_attention = _SlotAttention(
