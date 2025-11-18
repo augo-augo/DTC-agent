@@ -106,6 +106,8 @@ def load_training_config(path: str | Path, overrides: Iterable[str] | None = Non
     world_model_coef = resolved.get("world_model_coef", 1.0)
     device = resolved.get("device", "cpu")
     compile_modules = bool(resolved.get("compile_modules", False))
+    dream_noise_ratio = float(resolved.get("dream_noise_ratio", 0.25))
+    dream_counterfactual_rate = float(resolved.get("dream_counterfactual_rate", 0.1))
     self_state_dim = resolved.get("self_state_dim", 0)
 
     return TrainingConfig(
@@ -135,6 +137,8 @@ def load_training_config(path: str | Path, overrides: Iterable[str] | None = Non
         self_state_dim=self_state_dim,
         device=device,
         compile_modules=compile_modules,
+        dream_noise_ratio=dream_noise_ratio,
+        dream_counterfactual_rate=dream_counterfactual_rate,
     )
 
 

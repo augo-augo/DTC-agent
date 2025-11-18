@@ -310,6 +310,7 @@ class TrainingConfig:
     adaptive_entropy_target: float = 1.0
     adaptive_entropy_scale: float = 5.0
     dream_noise_ratio: float = 0.25
+    dream_counterfactual_rate: float = 0.1
     temporal_self: TemporalSelfConfig = field(default_factory=TemporalSelfConfig)
 
     @property
@@ -1226,7 +1227,7 @@ class TrainingLoop:
                     mutated_action = sampled_action + action_noise + policy_mutation
                     counterfactual_mask = (
                         torch.rand(sampled_action.shape[0], device=sampled_action.device)
-                        < 0.1
+                        < self.config.dream_counterfactual_rate
                     )
                     wild_action = torch.randn_like(sampled_action) * 2.0
                     executed_action = torch.where(
