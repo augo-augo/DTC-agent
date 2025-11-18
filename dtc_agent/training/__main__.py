@@ -133,6 +133,7 @@ def _actor_loop(
     log_interval: int,
     video_step_interval: int,
     steps_lock: threading.Lock,
+    policy_lock: threading.Lock,
     shared_state: Dict[str, int],
     stop_event: threading.Event,
     metrics_queue: Queue,
@@ -158,12 +159,13 @@ def _actor_loop(
         ).unsqueeze(0).to(runtime_device)
         episode_frames = [_frame_to_chw(frame)]
         while not stop_event.is_set():
-            with torch.no_grad():
-                policy_result = loop.step(
-                    observation_tensor,
-                    self_state=self_state_vec if self_state_vec.numel() > 0 else None,
-                    train=False,
-                )
+            with policy_lock:
+                with torch.no_grad():
+                    policy_result = loop.step(
+                        observation_tensor,
+                        self_state=self_state_vec if self_state_vec.numel() > 0 else None,
+                        train=False,
+                    )
             env_action = _select_env_action(policy_result.action, env.action_space.n)
             next_observation, env_reward, terminated, info = env.step(env_action)
             truncated = False
@@ -450,6 +452,7 @@ def main() -> None:
                 args.log_interval,
                 video_step_interval,
                 steps_lock,
+                policy_lock,
                 shared_state,
                 stop_event,
                 metrics_queue,
