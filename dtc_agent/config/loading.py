@@ -116,6 +116,7 @@ def load_training_config(path: str | Path, overrides: Iterable[str] | None = Non
     dream_counterfactual_base_rate = float(
         resolved.get("dream_counterfactual_base_rate", 0.1)
     )
+    dream_from_memory_rate = float(resolved.get("dream_from_memory_rate", 0.0))
     self_state_dim = resolved.get("self_state_dim", 0)
 
     return TrainingConfig(
@@ -147,6 +148,7 @@ def load_training_config(path: str | Path, overrides: Iterable[str] | None = Non
         compile_modules=compile_modules,
         dream_noise_base_ratio=dream_noise_base_ratio,
         dream_counterfactual_base_rate=dream_counterfactual_base_rate,
+        dream_from_memory_rate=dream_from_memory_rate,
         base_dream_horizon=int(base_dream_horizon),
         max_horizon_multiplier=float(max_horizon_multiplier),
         boredom_threshold=float(boredom_threshold),

@@ -312,6 +312,7 @@ class TrainingConfig:
     adaptive_entropy_scale: float = 5.0
     dream_noise_base_ratio: float = 0.1
     dream_counterfactual_base_rate: float = 0.1
+    dream_from_memory_rate: float = 0.0
     base_dream_horizon: int = 15
     max_horizon_multiplier: float = 8.0
     boredom_threshold: float = 0.5
@@ -645,7 +646,9 @@ class TrainingLoop:
 
                 latent_state = broadcast.mean(dim=1)
                 predictions = self.world_model.predict_next_latents(latent_state, action)
-                decoded = self.world_model.decode_predictions(predictions)
+                decoded = self.world_model.decode_predictions(
+                    predictions, use_frozen=True, sample=self.world_model.training
+                )
                 novelty_mix = None
                 if (
                     self.current_temporal_state is not None
@@ -709,7 +712,7 @@ class TrainingLoop:
         intrinsic = self.reward_normalizer(intrinsic_raw)
         reward_components = {key: value.detach() for key, value in norm_components.items()}
         raw_reward_components = {key: value.detach() for key, value in raw_components.items()}
-        self._write_memory(latents["z_self"], broadcast)
+        self._write_memory(latents["z_self"], latents["slots"], broadcast)
 
         if train and next_observation is not None:
             self.store_transition(
@@ -869,10 +872,17 @@ class TrainingLoop:
         context = values[:, 0, :].to(self.device)
         return context
 
-    def _write_memory(self, z_self: torch.Tensor, slots: torch.Tensor) -> None:
+    def _write_memory(
+        self, z_self: torch.Tensor, slots: torch.Tensor, broadcast: torch.Tensor
+    ) -> None:
         key = z_self.detach().cpu()
-        value = slots.mean(dim=1).detach().cpu()
-        self.memory.write(key, value)
+        if broadcast is not None:
+            context_value = broadcast.mean(dim=1)
+        else:
+            context_value = slots.mean(dim=1)
+        value = context_value.detach().cpu()
+        snapshot = (z_self.detach().cpu(), slots.detach().cpu())
+        self.memory.write(key, value, snapshot=snapshot)
 
     def _emergency_reset_if_corrupted(self) -> bool:
         """Reset critical parameters that have become non-finite.
@@ -1033,14 +1043,21 @@ class TrainingLoop:
             )
 
             predictions = self.world_model.predict_next_latents(latent_state, actions)
-            decoded = self.world_model.decode_predictions(predictions, use_frozen=False)
+            decoded = self.world_model.decode_predictions(
+                predictions,
+                use_frozen=False,
+                sample=self.world_model.training,
+            )
             log_likelihoods = torch.stack(
                 [dist.log_prob(next_observations).mean() for dist in decoded]
             )
             world_model_loss = -log_likelihoods.mean()
 
             encoded_next = self._call_with_fallback("world_model", next_observations)
-            predicted_latent = torch.stack(predictions).mean(dim=0)
+            mean_latents = torch.stack(
+                [pred.mean for pred in predictions], dim=0
+            )
+            predicted_latent = mean_latents.mean(dim=0)
             target_latent = encoded_next["slots"].mean(dim=1)
             latent_alignment = torch.nn.functional.mse_loss(predicted_latent, target_latent)
             world_model_loss = (
@@ -1186,6 +1203,27 @@ class TrainingLoop:
             else value
             for key, value in latents.items()
         }
+        memory_rate = float(getattr(self.config, "dream_from_memory_rate", 0.0))
+        if memory_rate > 0.0 and len(self.memory) > 0:
+            dream_batch = initial_latents["z_self"].shape[0]
+            seed_count = max(1, int(round(dream_batch * memory_rate)))
+            seed_count = min(dream_batch, seed_count)
+            try:
+                seed_z, seed_slots = self.memory.sample_uniform(
+                    seed_count, device=self.device
+                )
+            except ValueError:
+                seed_z = None
+                seed_slots = None
+            if seed_z is not None and seed_slots is not None:
+                perm = torch.randperm(dream_batch, device=self.device)[:seed_count]
+                initial_latents["z_self"][perm] = seed_z.to(
+                    device=self.device, dtype=initial_latents["z_self"].dtype
+                )
+                slot_tensor = initial_latents["slots"]
+                slot_tensor[perm] = seed_slots.to(
+                    device=self.device, dtype=slot_tensor.dtype
+                )
 
         if dynamic_noise_ratio > 0.0:
             z_self = initial_latents.get("z_self")
@@ -1212,7 +1250,6 @@ class TrainingLoop:
         log_probs: list[torch.Tensor] = []
         competence_terms = []
         empowerment_terms = []
-        safety_terms = []
         survival_terms = []
         intrinsic_terms = []
         explore_terms = []
@@ -1288,14 +1325,18 @@ class TrainingLoop:
                         latent_drift_norms.append(torch.tensor(0.0, device=latent_state.device))
 
                     predictions = self.world_model.predict_next_latents(latent_state, executed_action)
-                    if self.world_model.training:
-                        predictions = [
-                            pred
-                            + torch.randn_like(pred)
-                            * (ensemble_noise_base + 0.02 * float(idx))
-                            for idx, pred in enumerate(predictions)
-                        ]
-                    decoded = self.world_model.decode_predictions(predictions, use_frozen=False)
+                    latent_samples = []
+                    for idx, dist in enumerate(predictions):
+                        if self.world_model.training:
+                            sample = dist.rsample()
+                            noise = torch.randn_like(sample) * (
+                                ensemble_noise_base + 0.02 * float(idx)
+                            )
+                            sample = sample + noise
+                        else:
+                            sample = dist.mean
+                        latent_samples.append(sample)
+                    decoded = self.world_model.decode_predictions(latent_samples, use_frozen=False)
                     novelty_mix = dream_temporal_state.get("novelty_mix")
                     novelty = self.reward.get_novelty(
                         predictions, decoded, novelty_mix=novelty_mix
@@ -1333,7 +1374,6 @@ class TrainingLoop:
                                     "dream/intrinsic_reward",
                                     "dream/competence",
                                     "dream/empowerment",
-                                    "dream/safety",
                                     "dream/survival",
                                     "dream/policy_entropy",
                                     "dream/explore",
@@ -1364,7 +1404,6 @@ class TrainingLoop:
                     )
                     competence_terms.append(norm_components["competence"].detach().mean())
                     empowerment_terms.append(norm_components["empowerment"].detach().mean())
-                    safety_terms.append(norm_components["safety"].detach().mean())
                     survival_terms.append(norm_components["survival"].detach().mean())
                     intrinsic_terms.append(dream_reward.detach().mean())
                     explore_terms.append(norm_components["explore"].detach().mean())
@@ -1442,7 +1481,6 @@ class TrainingLoop:
         intrinsic_stack = torch.stack(intrinsic_terms)
         competence_stack = torch.stack(competence_terms)
         empowerment_stack = torch.stack(empowerment_terms)
-        safety_stack = torch.stack(safety_terms)
         survival_stack = torch.stack(survival_terms)
         explore_stack = torch.stack(explore_terms)
         raw_explore_stack = torch.stack(raw_explore_terms)
@@ -1491,7 +1529,6 @@ class TrainingLoop:
             "dream/intrinsic_reward": intrinsic_stack.mean().detach(),
             "dream/competence": competence_stack.mean().detach(),
             "dream/empowerment": empowerment_stack.mean().detach(),
-            "dream/safety": safety_stack.mean().detach(),
             "dream/survival": survival_stack.mean().detach(),
             "dream/policy_entropy": entropies_tensor.mean().detach(),
             "dream/explore": explore_stack.mean().detach(),

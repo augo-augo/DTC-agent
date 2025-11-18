@@ -1,7 +1,7 @@
 # DTC: An Intrinsically Motivated Agent for Emergent Curriculum Learning
 
 **Author:** augo-augo (Independent Researcher)  
-**Version:** 1.0 (October 2025)
+**Version:** 3.0 (November 2025)
 
 [![Paper](https://img.shields.io/badge/arXiv-Coming%20Soon-b31b1b.svg)](https://arxiv.org)
 [![Code](https://img.shields.io/badge/GitHub-DTC--agent-blue.svg)](https://github.com/augo-augo/DTC-agent)
@@ -11,9 +11,9 @@
 
 ## Abstract
 
-This repository contains the official implementation of the **DTC (Dual-Timescale Competence)** agent, a model-based reinforcement learning agent designed for open-ended learning without external rewards. The agent's behavior is driven by a novel intrinsic reward mechanism, **Dual-Timescale Competence**, which models "boredom" as the convergence of fast and slow exponential moving averages (EMAs) of epistemic novelty. This competence-driven signal is used by a **Cognitive Wave Controller** to dynamically modulate policy entropy, creating an adaptive exploration-exploitation cycle.
+This repository contains the official implementation of the **DTC (Dual-Timescale Competence)** agent, a model-based reinforcement learning agent designed for open-ended learning without external rewards. Version 3.0 introduces a *spectral intrinsic motivation stack* that combines **Learning Progress** with a **Clean Curiosity** signal derived from probabilistic dynamics, and adds **episodic dream seeding** to rehearse long-term skills. These components feed a **Cognitive Wave Controller** that modulates policy entropy to maintain perpetual discovery.
 
-When evaluated in the open-ended Crafter environment, the DTC agent demonstrates the emergence of a multi-stage developmental curriculum, progressing from simple survival skills to a "boredom trough," followed by the compositional discovery of more complex behaviors like agriculture and tool use. The architecture includes "hardened" intrinsic rewards that verifiably solve common pathologies, including the "dark room" problem and catastrophic forgetting, the latter of which is replaced by a "graceful skill deprecation" behavior.
+When evaluated in the open-ended Crafter environment, the DTC agent demonstrates the emergence of a multi-stage developmental curriculum, progressing from simple survival skills to a "boredom trough," followed by the compositional discovery of more complex behaviors like agriculture and tool use. The architecture now explicitly distinguishes epistemic from aleatoric uncertainty, preventing "white-noise addiction," and uses episodic teleportation to fight catastrophic forgetting without external rewards.
 
 ---
 
@@ -21,21 +21,23 @@ When evaluated in the open-ended Crafter environment, the DTC agent demonstrates
 
 The agent's behavior is an emergent property of three core mechanisms:
 
-### 1. Dual-Timescale Competence (The "Boredom" Signal)
+### 1. Dual-Timescale Learning Progress (The "Boredom" Signal)
 
-The primary reward component is $R_{comp}$, derived from two EMAs of epistemic novelty ($N_{epi,t}$):
+The primary reward component is $R_{LP}$, derived from two EMAs of *prediction error* ($E_{fast,t}$, $E_{slow,t}$) tracked over novelty batches:
 
-- **`ema_fast`** ($\alpha=0.2$): Tracks short-term learning progress
-- **`ema_slow`** ($\alpha=0.01$): Tracks long-term, stable knowledge
+- **`error_fast`** ($\alpha=0.3$): Captures the instantaneous surprise being experienced
+- **`error_slow`** ($\alpha=0.01$): Captures the background mastery level
 
-The competence reward is calculated as the difference between the slow and fast EMAs:
+The reward is the *rectified derivative* of understanding:
 
-$$R_{comp} = N^{slow}_{t-1} - N^{fast}_t$$
+$$
+R_{LP,t} = \mathrm{ReLU}\left(\frac{E_{slow,t-1} - E_{fast,t}}{E_{slow,t-1} + \varepsilon}\right)
+$$
 
-- **When Learning:** $N^{fast}$ is high, so $R_{comp}$ is positive
-- **When Mastered:** $N^{fast}$ drops to match $N^{slow}$, so $R_{comp} \to 0$. This "boredom" signal (a lack of competence reward) removes the incentive to practice mastered skills
+- **Discovery:** When error spikes, $E_{fast} > E_{slow}$ and $R_{LP} = 0$ (no punishment)
+- **Mastery:** As the model improves, $E_{fast}$ drops below $E_{slow}$ and $R_{LP} > 0$, creating a strong signal to keep practicing until boredom returns
 
-This dynamic is visible in the agent's training logs (see W&B link above), where the competence reward oscillates as tasks are imagined, mastered, and discarded during "dreamed" rollouts.
+This dynamic is visible in the agent's training logs where competence oscillates as tasks are imagined, mastered, and discarded during dreamed rollouts.
 
 ### 2. Cognitive Wave (The "Exploration" Driver)
 
@@ -49,12 +51,13 @@ This forces the agent to explore more diverse, novel policies in its imagination
 ![Cognitive Wave Entropy Boost](data/wave_entropy_boost.png)  
 *Figure 1: The Cognitive Wave Controller boosts dream entropy during periods of low environmental stimulus (boredom), enabling breakthrough discoveries.*
 
-### 3. Pathology Hardening (The "Safety" Net)
+### 3. Spectral Curiosity & Episodic Rehearsal
 
-The intrinsic reward function is "hardened" against common failures:
+Version 3.0 replaces the legacy "safety" hacks with principled mechanisms:
 
-- **"Dark Room" Problem:** A safety penalty $R_{safety}$ is applied when observation entropy $H[o_t]$ drops below a floor $H_{min}$. The agent verifiably learns to avoid these low-entropy states in its dreams and seeks more complex observations in the environment
-- **Latent Space Drift:** Novelty is calculated from *observation-space* disagreement (via a frozen decoder head), not latent-space, preventing the agent from "gaming" its own model
+- **Clean Novelty:** Each dynamics model predicts a Normal distribution. Ensemble disagreement ($\mathrm{Var}(\mu)$) is reduced by the predicted aleatoric noise ($\mathbb{E}[\sigma^2]$), rewarding only learnable ignorance. The agent no longer chases stochastic chaos.
+- **Probabilistic Dream Seeding:** An episodic FAISS buffer stores latent snapshots. A configurable fraction of every dream batch is *teleported* to recalled states, ensuring maintenance rehearsal and long-range exploration.
+- **Survival Bias:** A lightweight survival term keeps the agent slightly "hungry," guaranteeing forward momentum without hand-crafted safety floors.
 
 ---
 
@@ -64,7 +67,7 @@ Driven only by these internal signals—**without any external rewards or curric
 
 ### Phase I & II: Skill Mastery and "Boredom Trough" (~0k - 140k steps)
 
-The agent first masters basic skills like `wake_up`. Once mastered (~80k steps), the DTC "boredom" signal kicks in, and the agent *stops* performing the skill. This is not catastrophic forgetting; it is **graceful skill deprecation**.
+The agent first masters basic skills like `wake_up`. Once mastered (~80k steps), the DTC "boredom" signal kicks in, and the agent *stops* performing the skill. This is not catastrophic forgetting; it is **graceful skill deprecation** sustained by episodic rehearsal (dream seeding keeps the skill latent even while it is not actively practiced).
 
 ![Wake Up Achievement](data/wake_up.png)  
 *Figure 2: The agent masters `wake_up` in early training, then abandons it as the competence reward drops to zero.*

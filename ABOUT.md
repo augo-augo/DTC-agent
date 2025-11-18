@@ -80,26 +80,25 @@ This is the agent's "simulator" and perceptual system. It is composed of a share
 
 This subsystem calculates the final intrinsic reward $R_{intr}$ that trains the agent.
 
-  * **1. Epistemic Novelty Calculation (Fix \#1, \#8):**
-      * **Purpose:** To robustly measure agent *ignorance* without latent drift.
-      * **Mechanism:** We calculate novelty in **observation space**, not latent space. We use the **Jensen-Shannon Divergence (JSD)** between the $k$ predicted observations from the *shared decoder*.
-        $$N_{epi,t} \leftarrow \mathrm{JSD}\big(\{p_\theta(o_t\mid \hat z_t^{(i)})\}_{i=1}^k\big)$$
-      * **Hardening:** This calculation is performed using a **"frozen observer"** (a periodic copy of the decoder) that the policy cannot "game" via its actions.
-  * **2. Competence Reward (Fix \#2):**
-      * **Purpose:** To reward the agent for learning, while preventing oscillations or anxiety.
-      * **Mechanism:** A **dual-timescale "Goldilocks"** signal. We maintain a "fast" EMA $\bar{N}_{fast}$ of novelty. The reward is the progress against this baseline, *minus* a penalty for overwhelming novelty (chaos).
-        $$\bar{N}_{fast,t} = (1-\alpha_{\text{fast}})\bar{N}_{fast, t-1} + \alpha_{\text{fast}} N_{epi,t}$$
-        $$R_{comp,t} = \big(\bar{N}_{fast, t-1} - N_{epi,t}\big) - \kappa\cdot\max(0,\,N_{epi,t}-N_{high})$$
+  * **1. Clean Novelty Calculation (Fix \#1, \#8):**
+      * **Purpose:** To robustly measure learnable *ignorance* while ignoring irreducible noise.
+      * **Mechanism:** Each dynamics head predicts a Normal distribution $(\mu_i, \sigma_i^2)$. Novelty is the **rectified difference** between ensemble mean disagreement and the predicted aleatoric variance.
+        $$N_{epi,t} \leftarrow \mathrm{ReLU}\Big(\mathrm{Var}(\{\mu_i\}) - \mathbb{E}[\sigma_i^2]\Big)$$
+      * **Hardening:** Predictions are decoded with a *frozen observer*, preventing latent gaming, and aleatoric chaos yields zero reward by construction.
+  * **2. Learning-Progress Reward (Fix \#2):**
+      * **Purpose:** To reward the *derivative* of understanding while never punishing discovery.
+      * **Mechanism:** Dual EMAs track fast and slow prediction error. Competence is the normalized, rectified drop between them.
+        $$E_{fast,t} = (1-\alpha_{\text{fast}})E_{fast, t-1} + \alpha_{\text{fast}} N_{epi,t}$$
+        $$E_{slow,t} = (1-\alpha_{\text{slow}})E_{slow, t-1} + \alpha_{\text{slow}} N_{epi,t}$$
+        $$R_{LP,t} = \mathrm{ReLU}\left(\frac{E_{slow,t-1} - E_{fast,t}}{E_{slow,t-1} + \varepsilon}\right)$$
   * **3. Empowerment Reward (Fix \#3):**
       * **Purpose:** To provide a stable "drive to influence" that prevents the "dark room" problem.
       * **Mechanism:** We replace the unstable Mutual Information $I(A;S')$ with a stable **InfoNCE contrastive estimator** $f_\psi(a, z')$.
         $$R_{emp,t} \;\approx\; \log \frac{\exp f_\psi(a_t, z’{t})}{\sum{j=0}^{K}\exp f_\psi(a^-_j, z’{t})}$$
-  * **4. Safety Reward (Fix \#8):**
-      * **Purpose:** A final, hard-coded penalty against sensor-blinding.
-      * **Mechanism:** Penalize any drop in sensory entropy below a minimum threshold.
-        $$R_{safety} = -\lambda_{sens}\,\max(0, H_{min} - H[o_t])$$
-  * **Total Intrinsic Reward:**
-    $$R_{intr, t} = \lambda_{comp}R_{comp} + \lambda_{emp}R_{emp} + R_{safety}$$
+  * **4. Spectral Intrinsic Mix (Fix \#9):**
+      * **Purpose:** Blend curiosity, mastery, empowerment, and survival into a single reward while keeping it positive.
+      * **Mechanism:** Curiosity $R_{cur}=N_{epi}$ and mastery $R_{LP}$ form the primary signal, combined with empowerment and a light survival bias:
+        $$R_{intr, t} = \lambda_{cur}R_{cur} + \lambda_{LP}R_{LP} + \lambda_{emp}R_{emp} + \lambda_{surv}R_{surv}$$
 
 ### **Component III: The Cognitive Control Subsystem**
 
@@ -121,7 +120,7 @@ This manages attention (what to think about) and episodic memory (what to rememb
       * **Mechanism:** A Key-Value store (e.g., a FAISS index for kNN).
       * **Write:** At each step, a key (projected from $GW_t$) and a value (the recent trajectory data) are written to the buffer.
       * **Read:** The Actor queries the buffer using the *current* $GW_t$ to retrieve the $k$-Nearest-Neighbor experiences, which are fed in as context for action.
-      * **Maintenance:** Entries have a Time-To-Live (TTL) and are pruned unless re-retrieved, proving their relevance.
+      * **Maintenance & Dream Seeding:** Entries have a Time-To-Live (TTL) and are pruned unless re-retrieved; a configurable fraction of each dream batch is *teleported* to recalled states to rehearse old skills and explore distant frontiers.
 
 ### **Component IV: The Actor-Critic (AC) System**
 
@@ -208,35 +207,29 @@ class WM_Ensemble(nn.Module):
 
 # --- 2. Reward Generation Component ---
 class IntrinsicRewardGenerator:
-    def __init__(self, alpha_fast, N_high, kappa):
-        self.ema_fast = 0.0
+    def __init__(self, alpha_fast, alpha_slow, curiosity_scale, mastery_scale):
+        self.error_fast = 1.0
+        self.error_slow = 1.0
         self.alpha_fast = alpha_fast
-        self.N_high = N_high
-        self.kappa = kappa
-        
+        self.alpha_slow = alpha_slow
+        self.curiosity_scale = curiosity_scale
+        self.mastery_scale = mastery_scale
         self.R_emp_estimator = InfoNCE_Estimator()
-        self.R_safety_thresh = 0.1 # H_min
 
-    def get_R_comp(self, N_epi_t):
-        R_progress = self.ema_fast - N_epi_t
-        self.ema_fast = (1 - self.alpha_fast) * self.ema_fast + self.alpha_fast * N_epi_t
-        
-        R_anxiety_penalty = self.kappa * max(0, N_epi_t - self.N_high)
-        return R_progress - R_anxiety_penalty
+    def update_errors(self, novelty):
+        self.error_fast = (1 - self.alpha_fast) * self.error_fast + self.alpha_fast * novelty
+        self.error_slow = (1 - self.alpha_slow) * self.error_slow + self.alpha_slow * novelty
 
-    def get_R_safety(self, obs_t):
-        entropy = calculate_entropy(obs_t)
-        return -max(0, self.R_safety_thresh - entropy)
+    def get_learning_progress(self):
+        delta = self.error_slow - self.error_fast
+        return torch.relu(delta / (self.error_slow + 1e-6))
 
-    def get_full_reward(self, N_epi_t, obs_t, a_t, z_prime_t):
-        R_comp = self.get_R_comp(N_epi_t)
-        R_safety = self.get_R_safety(obs_t)
-        R_emp = self.R_emp_estimator(a_t, z_prime_t)
-        
-        R_intr = (lambda_comp * R_comp + 
-                  lambda_emp * R_emp + 
-                  lambda_safety * R_safety)
-        return R_intr
+    def get_full_reward(self, novelty, action, z_prime_t, survival_term):
+        self.update_errors(novelty)
+        R_cur = self.curiosity_scale * novelty
+        R_lp = self.mastery_scale * self.get_learning_progress()
+        R_emp = self.R_emp_estimator(action, z_prime_t)
+        return R_cur + R_lp + lambda_emp * R_emp + lambda_surv * survival_term
 
 # --- 3. Cognitive Control Components ---
 class WorkspaceRouter:

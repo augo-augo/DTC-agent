@@ -34,7 +34,7 @@ def test_training_loop_samples_action_without_input() -> None:
     assert result.action.shape == (1, config.dynamics.action_dim)
     assert result.reward_components is not None
     assert result.raw_reward_components is not None
-    for key in ("competence", "empowerment", "safety", "survival", "explore"):
+    for key in ("competence", "empowerment", "survival", "explore"):
         assert key in result.reward_components
         assert key in result.raw_reward_components
         assert result.reward_components[key].shape[0] == observation.shape[0]
@@ -63,7 +63,7 @@ def test_training_loop_step_returns_result(tmp_path) -> None:
     assert result.slot_scores.shape == (observation.shape[0], config.encoder.num_slots)
     assert result.reward_components is not None
     assert result.raw_reward_components is not None
-    expected_keys = {"competence", "empowerment", "safety", "survival", "explore"}
+    expected_keys = {"competence", "empowerment", "survival", "explore"}
     assert set(result.reward_components.keys()) == expected_keys
     assert set(result.raw_reward_components.keys()) == expected_keys
 

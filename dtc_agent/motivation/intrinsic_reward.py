@@ -78,12 +78,10 @@ class IntrinsicRewardConfig:
 
     Attributes:
         novelty_high: Threshold identifying unusually novel events.
-        safety_entropy_floor: Minimum acceptable observation entropy.
         component_clip: Clamp value applied after per-component normalization.
     """
 
     novelty_high: float
-    safety_entropy_floor: float
     component_clip: float = 5.0
 
 
@@ -110,57 +108,56 @@ class IntrinsicRewardGenerator:
         self._scalers = {
             "competence": _RewardScaler(clamp_value=config.component_clip),
             "empowerment": _RewardScaler(clamp_value=config.component_clip),
-            "safety": _RewardScaler(clamp_value=config.component_clip),
             "survival": _RewardScaler(clamp_value=config.component_clip),
             "explore": _RewardScaler(clamp_value=config.component_clip),
         }
         self._default_reward_lambdas: dict[str, float] = {
             "comp": 0.0,
             "emp": 0.0,
-            "safety": 0.0,
             "survival": 0.0,
             "explore": 0.0,
         }
 
     def get_novelty(
         self,
-        predicted_latents: Sequence[torch.Tensor],
+        predicted_latents: Sequence[torch.Tensor | torch.distributions.Distribution],
         predicted_observations: Sequence[torch.distributions.Distribution] | None,
         *,
         novelty_mix: Sequence[float] | None = None,
     ) -> torch.Tensor:
-        """Compute epistemic novelty using ensemble disagreement.
+        """Compute epistemic novelty with aleatoric subtraction.
 
         Args:
             predicted_latents: Sequence of latent predictions from the
                 dynamics ensemble.
-            predicted_observations: Optional decoded observation distributions
-                corresponding to ``predicted_latents``.
-            novelty_mix: Optional latent/decoded blend for the ensemble metric.
+            predicted_observations: Retained for compatibility; unused.
+            novelty_mix: Unused placeholder for backward compatibility.
 
         Returns:
             Tensor containing the normalized novelty estimate per batch item.
         """
 
-        raw_novelty = self.novelty_metric(
-            predicted_latents, predicted_observations, novelty_mix=novelty_mix
-        )
-        return self.novelty_calculator(raw_novelty)
+        del predicted_observations, novelty_mix
+        if not isinstance(predicted_latents, Sequence) or len(predicted_latents) == 0:
+            raise ValueError("predicted_latents must contain at least one element")
 
-    def get_safety(self, observation_entropy: torch.Tensor) -> torch.Tensor:
-        """Compute a safety penalty when observation entropy falls too low.
+        means = []
+        variances = []
+        for latent in predicted_latents:
+            if isinstance(latent, torch.distributions.Distribution):
+                means.append(latent.mean.to(dtype=torch.float32))
+                variances.append(latent.variance.to(dtype=torch.float32))
+            else:
+                tensor_latent = latent.to(dtype=torch.float32)
+                means.append(tensor_latent)
+                variances.append(torch.zeros_like(tensor_latent))
 
-        Args:
-            observation_entropy: Estimated entropy of the agent's observations.
-
-        Returns:
-            Negative tensor penalizing collapse below the entropy floor.
-        """
-
-        deficit = torch.relu(self.config.safety_entropy_floor - observation_entropy)
-        severe_deficit = torch.relu(deficit - 0.05)
-        penalty = deficit + 2.0 * severe_deficit.pow(2)
-        return -penalty
+        stacked_means = torch.stack(means, dim=0)
+        epistemic = stacked_means.var(dim=0, unbiased=False).mean(dim=-1)
+        stacked_vars = torch.stack(variances, dim=0)
+        aleatoric = stacked_vars.mean(dim=0).mean(dim=-1)
+        clean_novelty = torch.relu(epistemic - aleatoric)
+        return self.novelty_calculator(clean_novelty)
 
     def get_survival(self, self_state: torch.Tensor | None) -> torch.Tensor:
         """Encourage maintaining vital stats such as health and food.
@@ -223,25 +220,27 @@ class IntrinsicRewardGenerator:
             ``return_components`` is ``True``.
         """
 
+        del observation_entropy  # Retained for API compatibility
+        batch = action.shape[0]
+        device = action.device
+        dtype = novelty_batch.dtype
         if temporal_state is None:
-            r_comp = torch.zeros(
-                action.shape[0], device=action.device, dtype=novelty_batch.dtype
-            )
+            r_comp = torch.zeros(batch, device=device, dtype=dtype)
         else:
-            comp_tensor = temporal_state.get("R_comp")
-            if comp_tensor is None:
-                r_comp = torch.zeros(
-                    action.shape[0], device=action.device, dtype=novelty_batch.dtype
-                )
+            lp_tensor = temporal_state.get("learning_progress")
+            if lp_tensor is None:
+                lp_tensor = temporal_state.get("R_comp")
+            if lp_tensor is None:
+                r_comp = torch.zeros(batch, device=device, dtype=dtype)
             else:
-                r_comp = comp_tensor.to(device=action.device, dtype=novelty_batch.dtype)
+                r_comp = lp_tensor.to(device=device, dtype=dtype)
                 if r_comp.ndim == 0:
-                    r_comp = r_comp.expand(action.shape[0])
-                elif r_comp.size(0) != action.shape[0]:
+                    r_comp = r_comp.expand(batch)
+                elif r_comp.size(0) != batch:
                     if r_comp.size(0) == 1:
-                        r_comp = r_comp.expand(action.shape[0])
+                        r_comp = r_comp.expand(batch)
                     else:
-                        r_comp = r_comp[: action.shape[0]]
+                        r_comp = r_comp[:batch]
         if temporal_state is None:
             lambdas = self._default_reward_lambdas
         else:
@@ -251,14 +250,10 @@ class IntrinsicRewardGenerator:
             else:
                 lambdas = self._default_reward_lambdas
         r_emp = self.empowerment_estimator(action, latent)
-        r_safe = self.get_safety(observation_entropy)
         r_survival = self.get_survival(self_state).to(device=action.device)
         r_explore = novelty_batch
-        batch = action.shape[0]
         if r_comp.ndim == 0:
             r_comp = r_comp.expand(batch)
-        if r_safe.ndim == 0:
-            r_safe = r_safe.expand(batch)
         if r_survival.ndim == 0:
             r_survival = r_survival.expand(batch)
         elif r_survival.size(0) != batch and r_survival.size(0) > 0:
@@ -271,19 +266,16 @@ class IntrinsicRewardGenerator:
         normalized = {
             "competence": self._scalers["competence"](r_comp),
             "empowerment": self._scalers["empowerment"](r_emp),
-            "safety": self._scalers["safety"](r_safe),
             "survival": self._scalers["survival"](r_survival),
             "explore": r_explore,
         }
         lambda_comp = float(lambdas.get("comp", 0.0))
         lambda_emp = float(lambdas.get("emp", 0.0))
-        lambda_safety = float(lambdas.get("safety", 0.0))
         lambda_survival = float(lambdas.get("survival", 0.0))
         lambda_explore = float(lambdas.get("explore", 0.0))
         intrinsic = (
             lambda_comp * normalized["competence"]
             + lambda_emp * normalized["empowerment"]
-            + lambda_safety * normalized["safety"]
             + lambda_survival * normalized["survival"]
             + lambda_explore * normalized["explore"]
         )
@@ -291,7 +283,6 @@ class IntrinsicRewardGenerator:
             raw = {
                 "competence": r_comp.detach(),
                 "empowerment": r_emp.detach(),
-                "safety": r_safe.detach(),
                 "survival": r_survival.detach(),
                 "explore": r_explore.detach(),
             }

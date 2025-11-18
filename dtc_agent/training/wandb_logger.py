@@ -467,7 +467,6 @@ class WandBLogger:
                 {
                     "step/reward_competence": reward_components.get("competence", 0.0),
                     "step/reward_empowerment": reward_components.get("empowerment", 0.0),
-                    "step/reward_safety": reward_components.get("safety", 0.0),
                 }
             )
             explore_value = reward_components.get("explore", 0.0)

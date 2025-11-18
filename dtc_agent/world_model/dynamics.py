@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from torch.distributions import Normal
 
 
 @dataclass
@@ -39,9 +40,9 @@ class DynamicsModel(nn.Module):
         self.input_layer = nn.Linear(config.latent_dim + config.action_dim, config.hidden_dim)
         self.dropout = nn.Dropout(config.dropout)
         self.transition = nn.GRUCell(config.hidden_dim, config.latent_dim)
-        self.register_buffer("_noise_scale", torch.tensor(0.1))
+        self.out_net = nn.Linear(config.latent_dim, config.latent_dim * 2)
 
-    def forward(self, latent_state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(self, latent_state: torch.Tensor, action: torch.Tensor) -> Normal:
         """Predict the next latent state given the previous latent state and action.
 
         Args:
@@ -69,8 +70,11 @@ class DynamicsModel(nn.Module):
         else:
             autocast_ctx = nullcontext()
         with autocast_ctx:
-            next_latent = self.transition(hidden_float, latent_state_float)
-        if self.training:
-            noise = torch.randn_like(next_latent) * self._noise_scale
-            next_latent = next_latent + noise
-        return next_latent.to(target_dtype)
+            core_latent = self.transition(hidden_float, latent_state_float)
+        params = self.out_net(core_latent)
+        mean, log_std = torch.chunk(params, 2, dim=-1)
+        log_std = torch.clamp(log_std, -20.0, 2.0)
+        std = torch.exp(log_std)
+        mean = mean.to(dtype=target_dtype)
+        std = std.to(dtype=target_dtype)
+        return Normal(mean, std)

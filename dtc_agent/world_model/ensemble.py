@@ -76,20 +76,30 @@ class WorldModelEnsemble(nn.Module):
 
     def predict_next_latents(
         self, latent_state: torch.Tensor, action: torch.Tensor
-    ) -> List[torch.Tensor]:
-        """Run the ensemble forward to obtain next-state predictions.
+    ) -> List[torch.distributions.Distribution]:
+        """Run the ensemble forward to obtain next-state predictive distributions.
 
         Args:
             latent_state: Latent state tensor ``[batch, latent_dim]``.
             action: Action tensor ``[batch, action_dim]``.
 
         Returns:
-            List of predicted next latent states from each ensemble member.
+            List of predictive distributions from each ensemble member.
         """
         return [model(latent_state, action) for model in self.dynamics_models]
 
+    def _latent_tensor(
+        self, latent: torch.Tensor | torch.distributions.Distribution, *, sample: bool
+    ) -> torch.Tensor:
+        if isinstance(latent, torch.distributions.Distribution):
+            return latent.rsample() if sample else latent.mean
+        return latent
+
     def decode_predictions(
-        self, predicted_latents: Iterable[torch.Tensor], use_frozen: bool = True
+        self,
+        predicted_latents: Iterable[torch.Tensor | torch.distributions.Distribution],
+        use_frozen: bool = True,
+        sample: bool = False,
     ) -> List[torch.distributions.Distribution]:
         """Decode predicted latent states into observation distributions.
 
@@ -101,7 +111,10 @@ class WorldModelEnsemble(nn.Module):
             List of observation distributions for each latent input.
         """
         decoder = self.frozen_decoder if use_frozen else self.decoder
-        return [decoder(latent) for latent in predicted_latents]
+        latents = [
+            self._latent_tensor(latent, sample=sample) for latent in predicted_latents
+        ]
+        return [decoder(latent) for latent in latents]
 
     def get_epistemic_disagreement(
         self, predicted_latents: List[torch.Tensor]
@@ -119,10 +132,13 @@ class WorldModelEnsemble(nn.Module):
             device = param.device if param is not None else torch.device("cpu")
             return torch.zeros(0, device=device)
 
-        if len(predicted_latents) < 2:
-            return torch.zeros(predicted_latents[0].shape[0], device=predicted_latents[0].device)
+        sample_latents = [
+            self._latent_tensor(latent, sample=False) for latent in predicted_latents
+        ]
+        if len(sample_latents) < 2:
+            return torch.zeros(sample_latents[0].shape[0], device=sample_latents[0].device)
 
-        stacked = torch.stack(predicted_latents, dim=0)
+        stacked = torch.stack(sample_latents, dim=0)
         std_per_dim = stacked.std(dim=0)
         disagreement = std_per_dim.mean(dim=-1)
         return disagreement

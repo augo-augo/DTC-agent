@@ -21,12 +21,10 @@ class TemporalSelfConfig:
     dream_counterfactual_scale: float = 2.0
     alpha_fast: float = 0.3
     alpha_slow: float = 0.01
-    anxiety_penalty: float = 0.1
+    boredom_threshold: float = 0.5
     lambda_comp_base: float = 1.0
     lambda_comp_bored: float = 0.1
     lambda_emp_base: float = 0.5
-    lambda_safety_base: float = 0.5
-    lambda_safety_anxious: float = 2.0
     lambda_survival_base: float = 0.1
     lambda_explore_base: float = 0.65
     lambda_explore_bored: float = 2.0
@@ -45,10 +43,10 @@ class TemporalSelfModule(nn.Module):
     def __init__(self, config: TemporalSelfConfig) -> None:
         super().__init__()
         self.config = config
-        self.field_dim = 3  # ema_fast, ema_slow, deficit
+        self.field_dim = 3  # error_fast, error_slow, deficit
         window = max(1, int(config.stimulus_history_window))
-        self.register_buffer("ema_fast", torch.tensor(0.0))
-        self.register_buffer("ema_slow", torch.tensor(0.0))
+        self.register_buffer("error_fast", torch.tensor(0.0))
+        self.register_buffer("error_slow", torch.tensor(0.0))
         self.register_buffer("stimulus_level", torch.tensor(0.0))
         self.register_buffer("_ema_initialized", torch.tensor(0.0))
         self.stimulus_history: Deque[float] = deque(maxlen=window)
@@ -62,8 +60,8 @@ class TemporalSelfModule(nn.Module):
         """Capture internal buffers for temporary what-if simulations."""
 
         return {
-            "ema_fast": self.ema_fast.detach().clone(),
-            "ema_slow": self.ema_slow.detach().clone(),
+            "error_fast": self.error_fast.detach().clone(),
+            "error_slow": self.error_slow.detach().clone(),
             "stimulus_level": self.stimulus_level.detach().clone(),
             "_ema_initialized": self._ema_initialized.detach().clone(),
             "stimulus_history": deque(self.stimulus_history, maxlen=self.stimulus_history.maxlen),
@@ -72,9 +70,9 @@ class TemporalSelfModule(nn.Module):
     def restore(self, snapshot: Dict[str, Any]) -> None:
         """Restore buffers from :meth:`snapshot`."""
 
-        device = self.ema_fast.device
-        self.ema_fast.copy_(snapshot["ema_fast"].to(device=device))
-        self.ema_slow.copy_(snapshot["ema_slow"].to(device=device))
+        device = self.error_fast.device
+        self.error_fast.copy_(snapshot["error_fast"].to(device=device))
+        self.error_slow.copy_(snapshot["error_slow"].to(device=device))
         self.stimulus_level.copy_(snapshot["stimulus_level"].to(device=device))
         self._ema_initialized.copy_(snapshot["_ema_initialized"].to(device=device))
         history: Deque[float] = snapshot["stimulus_history"]
@@ -89,8 +87,8 @@ class TemporalSelfModule(nn.Module):
     ) -> dict[str, Any]:
         """Return an initial temporal-state dictionary for the given batch."""
 
-        device = device or self.ema_fast.device
-        dtype = dtype or self.ema_fast.dtype
+        device = device or self.error_fast.device
+        dtype = dtype or self.error_fast.dtype
         zeros_field = torch.zeros(batch_size, self.field_dim, device=device, dtype=dtype)
         r_comp = torch.zeros(batch_size, device=device, dtype=dtype)
         default_mode = "STARTING"
@@ -100,6 +98,7 @@ class TemporalSelfModule(nn.Module):
             "cognitive_mode": default_mode,
             "stimulus_deficit": 0.0,
             "stimulus_level": float(self.stimulus_level.detach().item()),
+            "learning_progress": r_comp.clone(),
             "learning_rate_scale": 1.0,
             "reward_lambdas": self._reward_lambdas_for_mode(default_mode),
             "novelty_mix": self._novelty_mix_for_mode(default_mode),
@@ -116,7 +115,7 @@ class TemporalSelfModule(nn.Module):
         if raw_novelty_batch.ndim == 0:
             raw_novelty_batch = raw_novelty_batch.unsqueeze(0)
         batch_size = raw_novelty_batch.shape[0]
-        device = self.ema_fast.device
+        device = self.error_fast.device
         dtype = raw_novelty_batch.dtype
         novelty_tensor = raw_novelty_batch.detach().to(device=device, dtype=torch.float32)
         with torch.no_grad():
@@ -126,20 +125,20 @@ class TemporalSelfModule(nn.Module):
 
             if self._ema_initialized.item() == 0:
                 init_value = torch.clamp(novelty_mean, min=0.05, max=10.0)
-                self.ema_fast.copy_(init_value)
-                self.ema_slow.copy_(init_value)
+                self.error_fast.copy_(init_value)
+                self.error_slow.copy_(init_value)
                 self.stimulus_level.copy_(init_value)
                 self._ema_initialized.fill_(1.0)
 
-            ema_fast_prev = self.ema_fast.clone()
-            ema_slow_prev = self.ema_slow.clone()
+            error_fast_prev = self.error_fast.clone()
+            error_slow_prev = self.error_slow.clone()
 
             alpha_fast = float(self.config.alpha_fast)
             alpha_slow = float(self.config.alpha_slow)
-            new_fast = (1.0 - alpha_fast) * self.ema_fast + alpha_fast * novelty_mean
-            new_slow = (1.0 - alpha_slow) * self.ema_slow + alpha_slow * novelty_mean
-            self.ema_fast.copy_(new_fast)
-            self.ema_slow.copy_(new_slow)
+            new_fast = (1.0 - alpha_fast) * self.error_fast + alpha_fast * novelty_mean
+            new_slow = (1.0 - alpha_slow) * self.error_slow + alpha_slow * novelty_mean
+            self.error_fast.copy_(new_fast)
+            self.error_slow.copy_(new_slow)
 
             momentum = max(0.0, min(1.0, float(self.config.stimulus_ema_momentum)))
             stimulus_level = (1.0 - momentum) * self.stimulus_level + momentum * novelty_mean
@@ -151,40 +150,42 @@ class TemporalSelfModule(nn.Module):
             else:
                 baseline_val = float(stimulus_level.item())
 
-            progress = ema_slow_prev - self.ema_fast
-            anxiety = self.config.anxiety_penalty * torch.relu(self.ema_fast - ema_slow_prev)
-            progress_detached = progress.detach()
-            anxiety_detached = anxiety.detach()
+            delta = error_slow_prev - self.error_fast
+            learning_progress = torch.relu(delta / (error_slow_prev + 1e-6))
+            stimulus_level_value = float(stimulus_level.detach().item())
+            engagement = learning_progress + self.stimulus_level
+            boredom_drive = torch.sigmoid(
+                (float(self.config.boredom_threshold) - engagement) * 5.0
+            )
+            stimulus_deficit_value = float(boredom_drive.detach().item())
             self._last_breakdown = {
-                "progress": progress_detached,
-                "anxiety": anxiety_detached,
-                "ema_fast": self.ema_fast.detach().clone(),
-                "ema_slow": self.ema_slow.detach().clone(),
+                "progress": learning_progress.detach().clone(),
+                "penalty": boredom_drive.detach().clone(),
+                "ema_prev": error_slow_prev.detach().clone(),
+                "ema_current": self.error_fast.detach().clone(),
             }
 
-            comp_scalar = (progress - anxiety).to(dtype=dtype)
+            comp_scalar = learning_progress.to(dtype=dtype)
             r_comp = torch.full((batch_size,), float(comp_scalar.item()), device=device, dtype=dtype)
 
-            stimulus_level_value = float(stimulus_level.detach().item())
-            stimulus_deficit = max(0.0, baseline_val - stimulus_level_value)
             stimulus_surplus = max(0.0, stimulus_level_value - baseline_val)
 
             cognitive_mode = "LEARNING"
-            if stimulus_deficit > 0.1:
+            if stimulus_deficit_value > 0.55:
                 cognitive_mode = "BORED"
-            elif float(anxiety_detached.item()) > 0.0:
+            elif float(delta.item()) < 0.0:
                 cognitive_mode = "ANXIOUS"
 
             lr_scale = 1.0 + stimulus_surplus * self.config.learning_rate_scale
             lr_scale = max(1.0, min(self.config.learning_rate_scale, lr_scale))
 
             deficit_tensor = torch.full(
-                (batch_size,), stimulus_deficit, device=device, dtype=dtype
+                (batch_size,), stimulus_deficit_value, device=device, dtype=dtype
             )
             field_tensor = torch.stack(
                 (
-                    self.ema_fast.to(dtype=dtype).expand(batch_size),
-                    self.ema_slow.to(dtype=dtype).expand(batch_size),
+                    self.error_fast.to(dtype=dtype).expand(batch_size),
+                    self.error_slow.to(dtype=dtype).expand(batch_size),
                     deficit_tensor,
                 ),
                 dim=-1,
@@ -196,11 +197,12 @@ class TemporalSelfModule(nn.Module):
             "field_tensor": field_tensor,
             "R_comp": r_comp,
             "cognitive_mode": cognitive_mode,
-            "stimulus_deficit": stimulus_deficit,
+            "stimulus_deficit": stimulus_deficit_value,
             "stimulus_level": stimulus_level_value,
             "learning_rate_scale": lr_scale,
             "reward_lambdas": reward_lambdas,
             "novelty_mix": novelty_mix,
+            "learning_progress": r_comp,
         }
 
     def _reward_lambdas_for_mode(self, cognitive_mode: str) -> dict[str, float]:
@@ -209,19 +211,16 @@ class TemporalSelfModule(nn.Module):
         mode = cognitive_mode.upper()
         lambda_comp = float(self.config.lambda_comp_base)
         lambda_explore = float(self.config.lambda_explore_base)
-        lambda_safety = float(self.config.lambda_safety_base)
 
         if mode == "BORED":
             lambda_comp = float(self.config.lambda_comp_bored)
             lambda_explore = float(self.config.lambda_explore_bored)
         elif mode == "ANXIOUS":
             lambda_explore = float(self.config.lambda_explore_anxious)
-            lambda_safety = float(self.config.lambda_safety_anxious)
 
         return {
             "comp": lambda_comp,
             "explore": lambda_explore,
-            "safety": lambda_safety,
             "emp": float(self.config.lambda_emp_base),
             "survival": float(self.config.lambda_survival_base),
         }

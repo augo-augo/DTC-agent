@@ -37,7 +37,6 @@ workspace:
 # ABLATION: Simplified reward with no exploration bonus
 reward:
   novelty_high: 10.0           # Disabled anxiety penalty
-  safety_entropy_floor: 0.1
   component_clip: 5.0
 
 temporal_self:
@@ -50,12 +49,10 @@ temporal_self:
   dream_counterfactual_scale: 2.0
   alpha_fast: 0.3
   alpha_slow: 0.01
-  anxiety_penalty: 0.1         # Minimal
+  boredom_threshold: 0.5
   lambda_comp_base: 2.0
   lambda_comp_bored: 0.2
   lambda_emp_base: 0.3
-  lambda_safety_base: 0.2
-  lambda_safety_anxious: 0.6
   lambda_survival_base: 0.0
   lambda_explore_base: 0.0
   lambda_explore_bored: 0.0
@@ -109,6 +106,7 @@ adaptive_entropy_target: 1.0
 adaptive_entropy_scale: 5.0
 dream_noise_base_ratio: 0.1
 dream_counterfactual_base_rate: 0.1
+dream_from_memory_rate: 0.5
 base_dream_horizon: 10
 max_horizon_multiplier: 8.0
 boredom_threshold: 0.5
