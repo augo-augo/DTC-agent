@@ -2,6 +2,7 @@ encoder:
   observation_shape: [3, 32, 32]
   slot_dim: 32
   num_slots: 3
+  cnn_channels: [32, 64, 32]
 
 decoder:
   observation_shape: [3, 32, 32]
