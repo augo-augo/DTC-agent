@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from contextlib import nullcontext
 import math
+import threading
 from typing import Any, Callable, ContextManager, ParamSpec, Protocol, TypeVar, cast
 
 import torch
@@ -14,7 +15,7 @@ from dtc_agent.agents import (
 )
 from dtc_agent.cognition import WorkspaceConfig, WorkspaceRouter
 from dtc_agent.cognition.temporal_self import TemporalSelfConfig, TemporalSelfModule
-from dtc_agent.memory import EpisodicBuffer, EpisodicBufferConfig
+from dtc_agent.memory import EpisodicBuffer, EpisodicBufferConfig, EpisodicSnapshot
 from dtc_agent.motivation import (
     EmpowermentConfig,
     IntrinsicRewardConfig,
@@ -254,6 +255,15 @@ class RewardNormalizer:
 
 
 @dataclass
+class LatentSnapshot:
+    """Latent tensors captured during a policy evaluation step."""
+
+    z_self: torch.Tensor
+    slots: torch.Tensor
+    latent_state: torch.Tensor
+
+
+@dataclass
 class StepResult:
     """Container summarizing the outputs of a single training step.
 
@@ -270,6 +280,7 @@ class StepResult:
     competence_breakdown: dict[str, torch.Tensor] | None = None
     epistemic_novelty: torch.Tensor | None = None
     real_action_entropy: float | None = None
+    latent_snapshot: LatentSnapshot | None = None
 
 
 @dataclass
@@ -290,6 +301,7 @@ class TrainingConfig:
     episodic_memory: EpisodicBufferConfig
     rollout_capacity: int = 1024
     batch_size: int = 32
+    policy_snapshot_interval: int = 100
     optimizer_lr: float = 1e-3
     optimizer_empowerment_weight: float = 0.1
     actor: ActorConfig = field(
@@ -376,15 +388,14 @@ class TrainingLoop:
             + config.episodic_memory.key_dim
             + self.temporal_self.field_dim
         )
-        actor_net = ActorNetwork(
-            ActorConfig(
-                latent_dim=policy_feature_dim,
-                action_dim=config.dynamics.action_dim,
-                hidden_dim=config.actor.hidden_dim,
-                num_layers=config.actor.num_layers,
-                dropout=config.actor.dropout,
-            )
-        ).to(self.device)
+        actor_cfg = ActorConfig(
+            latent_dim=policy_feature_dim,
+            action_dim=config.dynamics.action_dim,
+            hidden_dim=config.actor.hidden_dim,
+            num_layers=config.actor.num_layers,
+            dropout=config.actor.dropout,
+        )
+        actor_net = ActorNetwork(actor_cfg).to(self.device)
         critic_net = CriticNetwork(
             CriticConfig(
                 latent_dim=policy_feature_dim,
@@ -399,6 +410,9 @@ class TrainingLoop:
         else:
             self.actor = actor_net
             self.critic = critic_net
+        self.actor_eval = ActorNetwork(actor_cfg).to(self.device)
+        self.actor_eval.load_state_dict(self.actor.state_dict())
+        self.actor_eval.eval()
 
         self.self_state_dim = config.self_state_dim
         if self.self_state_dim > 0:
@@ -418,6 +432,9 @@ class TrainingLoop:
         self._step_count: int = 0
         self._novelty_trace: torch.Tensor | None = None
         self._latest_self_state: torch.Tensor | None = None
+        self._step_lock = threading.Lock()
+        self._policy_snapshot_interval = max(1, config.policy_snapshot_interval)
+        self._last_snapshot_sync = 0
 
         self.rollout_buffer = RolloutBuffer(capacity=config.rollout_capacity)
         self.batch_size = config.batch_size
@@ -507,27 +524,34 @@ class TrainingLoop:
         next_observation: torch.Tensor | None = None,
         self_state: torch.Tensor | None = None,
         train: bool = False,
+        actor_model: nn.Module | None = None,
     ) -> StepResult:
-        """Perform a single interaction step and optional training update.
+        """Perform a single interaction step and optional training update."""
 
-        Args:
-            observation: Current observation batch.
-            action: Optional precomputed action batch. When ``None`` the actor
-                samples new actions.
-            next_observation: Optional successor observation used for training
-                updates.
-            self_state: Optional auxiliary self-state tensor.
-            train: When ``True`` and ``next_observation`` is provided the stored
-                rollouts trigger an optimization step once the buffer is ready.
+        if not train and actor_model is None and hasattr(self, "_step_lock") and self._step_lock is not None:
+            lock_ctx: ContextManager[Any] = self._step_lock  # type: ignore[assignment]
+        else:
+            lock_ctx = nullcontext()
+        with lock_ctx:
+            return self._step_impl(
+                observation,
+                action=action,
+                next_observation=next_observation,
+                self_state=self_state,
+                train=train,
+                actor_model=actor_model,
+            )
 
-        Returns:
-            :class:`StepResult` containing rollout data, diagnostics, and
-            optional training metrics.
-
-        Raises:
-            ValueError: If provided self-state tensors have incompatible batch
-                dimensions.
-        """
+    def _step_impl(
+        self,
+        observation: torch.Tensor,
+        action: torch.Tensor | None = None,
+        next_observation: torch.Tensor | None = None,
+        self_state: torch.Tensor | None = None,
+        train: bool = False,
+        actor_model: nn.Module | None = None,
+    ) -> StepResult:
+        """Internal implementation of :meth:`step` without locking."""
         observation = observation.to(self.device, non_blocking=True)
         batch = observation.size(0)
         state_tensor: torch.Tensor | None
@@ -571,6 +595,7 @@ class TrainingLoop:
         competence_breakdown: dict[str, torch.Tensor] | None = None
         epistemic_novelty: torch.Tensor | None = None
         current_real_entropy: float | None = None
+        latent_snapshot: LatentSnapshot | None = None
 
         restore_world_model = False
         if not train and self.world_model.training:
@@ -617,7 +642,12 @@ class TrainingLoop:
                     latents["z_self"], broadcast, memory_context, temporal_field
                 )
                 if action is None:
-                    action_dist = self._call_with_fallback("actor", features)
+                    if actor_model is not None:
+                        # Use the thread-local actor snapshot if provided (lock-free path)
+                        action_dist = actor_model(features)
+                    else:
+                        actor_attr = "actor" if train else "actor_eval"
+                        action_dist = self._call_with_fallback(actor_attr, features)
                     base_entropy = action_dist.entropy()
                     actor_boost = 1.0 + (
                         stimulus_deficit * self.config.temporal_self.actor_entropy_scale
@@ -666,6 +696,11 @@ class TrainingLoop:
                     action = action.to(self.device, non_blocking=True)
 
                 latent_state = broadcast.mean(dim=1)
+                latent_snapshot = LatentSnapshot(
+                    z_self=latents["z_self"].detach(),
+                    slots=latents["slots"].detach(),
+                    latent_state=latent_state.detach(),
+                )
                 predictions = self.world_model.predict_next_latents(latent_state, action)
                 decoded = self.world_model.decode_predictions(
                     predictions, use_frozen=True, sample=self.world_model.training
@@ -733,7 +768,6 @@ class TrainingLoop:
         intrinsic = self.reward_normalizer(intrinsic_raw)
         reward_components = {key: value.detach() for key, value in norm_components.items()}
         raw_reward_components = {key: value.detach() for key, value in raw_components.items()}
-        self._write_memory(latents["z_self"], latents["slots"], broadcast)
 
         if train and next_observation is not None:
             self.store_transition(
@@ -753,6 +787,7 @@ class TrainingLoop:
             competence_breakdown=competence_breakdown,
             epistemic_novelty=epistemic_novelty.detach() if epistemic_novelty is not None else None,
             real_action_entropy=current_real_entropy,
+            latent_snapshot=latent_snapshot,
         )
 
     def store_transition(
@@ -793,6 +828,28 @@ class TrainingLoop:
                 next_cpu[idx],
                 state_cpu[idx] if state_cpu is not None else None,
             )
+
+    def store_latent_transition(
+        self,
+        snapshot: LatentSnapshot | None,
+        action: torch.Tensor,
+        next_observation: torch.Tensor,
+    ) -> None:
+        """Persist latent transitions for episodic replay."""
+
+        if snapshot is None:
+            return
+
+        batch = action.shape[0]
+        if snapshot.z_self.size(0) != batch:
+            raise ValueError("latent snapshot and action batch sizes must match")
+
+        with torch.no_grad():
+            with self._autocast_ctx():
+                next_obs = next_observation.to(self.device, non_blocking=True)
+                next_latents = self._call_with_fallback("world_model", next_obs)
+        target_latent = next_latents["slots"].mean(dim=1)
+        self._write_memory(snapshot, action=action, target_latent=target_latent)
 
     def _route_slots(
         self,
@@ -894,16 +951,34 @@ class TrainingLoop:
         return context
 
     def _write_memory(
-        self, z_self: torch.Tensor, slots: torch.Tensor, broadcast: torch.Tensor
+        self,
+        snapshot: LatentSnapshot,
+        *,
+        action: torch.Tensor | None = None,
+        target_latent: torch.Tensor | None = None,
     ) -> None:
-        key = z_self.detach().cpu()
-        if broadcast is not None:
-            context_value = broadcast.mean(dim=1)
-        else:
-            context_value = slots.mean(dim=1)
-        value = context_value.detach().cpu()
-        snapshot = (z_self.detach().cpu(), slots.detach().cpu())
-        self.memory.write(key, value, snapshot=snapshot)
+        key = snapshot.z_self.detach().to("cpu", non_blocking=True)
+        context_value = snapshot.latent_state.detach().to("cpu", non_blocking=True)
+        slots = snapshot.slots.detach().to("cpu", non_blocking=True)
+        action_cpu = (
+            action.detach().to("cpu", non_blocking=True) if action is not None else None
+        )
+        target_cpu = (
+            target_latent.detach().to("cpu", non_blocking=True)
+            if target_latent is not None
+            else None
+        )
+        payload = EpisodicSnapshot(
+            z_self=key, slots=slots, action=action_cpu, target_latent=target_cpu
+        )
+        self.memory.write(key, context_value, snapshot=payload)
+
+    def refresh_policy_snapshot(self) -> None:
+        """Update the inference policy copy with the latest trained weights."""
+
+        with torch.no_grad():
+            self.actor_eval.load_state_dict(self.actor.state_dict())
+            self.actor_eval.eval()
 
     def _emergency_reset_if_corrupted(self) -> bool:
         """Reset critical parameters that have become non-finite.
@@ -1021,9 +1096,20 @@ class TrainingLoop:
         if self_states is not None:
             self_states = self_states.to(self.device, non_blocking=True)
 
+        replay_batch = max(1, self.batch_size // 2)
+        replay_samples: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        if len(self.memory) > 0:
+            try:
+                replay_samples = self.memory.sample_transitions(
+                    replay_batch, device=self.device
+                )
+            except ValueError:
+                replay_samples = None
+
         self.optimizer.zero_grad(set_to_none=True)
 
         emp_diag: dict[str, float] | None = None
+        replay_loss_value: torch.Tensor | None = None
 
         with self._autocast_ctx():
             latents = self._call_with_fallback("world_model", observations)
@@ -1072,18 +1158,33 @@ class TrainingLoop:
             log_likelihoods = torch.stack(
                 [dist.log_prob(next_observations).mean() for dist in decoded]
             )
-            world_model_loss = -log_likelihoods.mean()
+            frontier_loss = -log_likelihoods.mean()
 
             encoded_next = self._call_with_fallback("world_model", next_observations)
-            mean_latents = torch.stack(
-                [pred.mean for pred in predictions], dim=0
-            )
+            mean_latents = torch.stack([pred.mean for pred in predictions], dim=0)
             predicted_latent = mean_latents.mean(dim=0)
             target_latent = encoded_next["slots"].mean(dim=1)
             latent_alignment = torch.nn.functional.mse_loss(predicted_latent, target_latent)
-            world_model_loss = (
-                world_model_loss + 0.1 * latent_alignment
-            ) * self.config.world_model_coef
+            frontier_loss = frontier_loss + 0.1 * latent_alignment
+
+            replay_loss = torch.tensor(0.0, device=self.device)
+            if replay_samples is not None:
+                replay_latent, replay_actions, replay_targets = replay_samples
+                replay_predictions = self.world_model.predict_next_latents(
+                    replay_latent, replay_actions
+                )
+                replay_mean = torch.stack(
+                    [dist.mean for dist in replay_predictions], dim=0
+                ).mean(dim=0)
+                replay_loss = torch.nn.functional.mse_loss(replay_mean, replay_targets)
+
+            replay_loss_value = replay_loss
+
+            if replay_samples is not None:
+                world_model_loss = 0.5 * (frontier_loss + replay_loss)
+            else:
+                world_model_loss = frontier_loss
+            world_model_loss = world_model_loss * self.config.world_model_coef
 
             self_state_loss = torch.tensor(0.0, device=self.device)
             if (
@@ -1160,6 +1261,13 @@ class TrainingLoop:
         self.grad_scaler.step(self.optimizer)
         self.grad_scaler.update()
 
+        if (
+            self._step_count - self._last_snapshot_sync
+            >= self._policy_snapshot_interval
+        ):
+            self.refresh_policy_snapshot()
+            self._last_snapshot_sync = self._step_count
+
         if self._step_count > 0 and self._step_count % 1000 == 0:
             self.world_model.refresh_frozen_decoder()
             if self._step_count % 5000 == 0:
@@ -1180,6 +1288,10 @@ class TrainingLoop:
             ),
             "temporal/learning_rate_scale": float(lr_scale),
         }
+        if replay_loss_value is not None:
+            metrics["train/world_model_replay_loss"] = float(
+                replay_loss_value.detach().cpu().item()
+            )
         if emp_diag is not None:
             metrics["debug/empowerment_queue_size"] = float(emp_diag["queue_size"])
             metrics["debug/empowerment_queue_diversity"] = float(emp_diag["queue_diversity"])
@@ -1246,17 +1358,8 @@ class TrainingLoop:
                     device=self.device, dtype=slot_tensor.dtype
                 )
 
-        if dynamic_noise_ratio > 0.0:
-            z_self = initial_latents.get("z_self")
-            slots = initial_latents.get("slots")
-            if isinstance(z_self, torch.Tensor) and isinstance(slots, torch.Tensor):
-                batch_size = z_self.shape[0]
-                num_noise = int(batch_size * float(dynamic_noise_ratio))
-                if num_noise > 0:
-                    noise_z = torch.randn_like(z_self[:num_noise])
-                    noise_slots = torch.randn_like(slots[:num_noise])
-                    z_self[:num_noise] = noise_z
-                    slots[:num_noise] = noise_slots
+        # Latent drift injection removed per DTC 3.0 spec (Aleatoric Subtraction)
+        # Rely on ensemble output noise (rsample) instead of input noise.
         memory_context = self._get_memory_context(initial_latents["z_self"]).detach()
         dream_self_state: torch.Tensor | None = None
         if self._latest_self_state is not None:
@@ -1338,12 +1441,7 @@ class TrainingLoop:
                     counterfactual_rates.append(counterfactual_mask.float().mean())
 
                     latent_state = broadcast.mean(dim=1)
-                    if self.world_model.training:
-                        latent_drift = torch.randn_like(latent_state) * 0.05
-                        latent_state = latent_state + latent_drift
-                        latent_drift_norms.append(latent_drift.norm(dim=-1).mean())
-                    else:
-                        latent_drift_norms.append(torch.tensor(0.0, device=latent_state.device))
+                    latent_drift_norms.append(torch.tensor(0.0, device=latent_state.device))
 
                     predictions = self.world_model.predict_next_latents(latent_state, executed_action)
                     latent_samples = []

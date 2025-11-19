@@ -26,7 +26,9 @@ from omegaconf import OmegaConf
 
 from dtc_agent.config import load_training_config
 from dtc_agent.training import StepResult, TrainingLoop
+from dtc_agent.training.loop import LatentSnapshot
 from dtc_agent.training.wandb_logger import WandBLogger
+from dtc_agent.agents import ActorNetwork, ActorConfig
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -97,6 +99,13 @@ def _detach_step_result(result: StepResult) -> StepResult:
         result.competence_breakdown = {
             name: _tensor_to_cpu(value) for name, value in result.competence_breakdown.items()
         }
+    if result.latent_snapshot is not None:
+        snapshot = result.latent_snapshot
+        result.latent_snapshot = LatentSnapshot(
+            z_self=_tensor_to_cpu(snapshot.z_self),
+            slots=_tensor_to_cpu(snapshot.slots),
+            latent_state=_tensor_to_cpu(snapshot.latent_state),
+        )
     return result
 
 
@@ -163,7 +172,6 @@ def _actor_loop(
     log_interval: int,
     video_step_interval: int,
     steps_lock: threading.Lock,
-    policy_lock: threading.Lock,
     shared_state: Dict[str, int],
     stop_event: threading.Event,
     metrics_queue: Queue,
@@ -179,6 +187,7 @@ def _actor_loop(
                 device_index = 0
         torch.cuda.set_device(device_index)
     env = crafter.Env()
+
     try:
         if hasattr(env, "seed"):
             env.seed(seed)
@@ -197,17 +206,54 @@ def _actor_loop(
             state_dim=config.self_state_dim,
         ).unsqueeze(0)
         episode_frames = [_frame_to_chw(frame)]
+
+        # Local actor snapshot for lock-free inference
+        # We reconstruct the config to create an independent model instance
+        slot_dim = config.encoder.slot_dim
+        policy_feature_dim = (
+            slot_dim
+            + slot_dim * config.workspace.broadcast_slots
+            + config.episodic_memory.key_dim
+            + loop.temporal_self.field_dim
+        )
+        actor_cfg = ActorConfig(
+            latent_dim=policy_feature_dim,
+            action_dim=config.dynamics.action_dim,
+            hidden_dim=config.actor.hidden_dim,
+            num_layers=config.actor.num_layers,
+            dropout=config.actor.dropout,
+        )
+        actor_snapshot = ActorNetwork(actor_cfg).to(runtime_device)
+        actor_snapshot.load_state_dict(loop.actor_eval.state_dict())
+        actor_snapshot.eval()
+        last_snapshot_update = 0
+
         while not stop_event.is_set():
-            with policy_lock:
-                with torch.no_grad():
-                    policy_result = loop.step(
-                        observation_tensor,
-                        self_state=self_state_vec if self_state_vec.numel() > 0 else None,
-                        train=False,
-                    )
-                if device_index is not None:
-                    torch.cuda.synchronize(device_index)
-                policy_result = _detach_step_result(policy_result)
+            # Periodic snapshot update (every ~100 steps)
+            # We use a simple counter check. Since loop.actor_eval is updated by the main thread,
+            # we might read slightly stale weights, which is fine.
+            # Ideally we would use a lock to read loop.actor_eval, but we want to avoid contention.
+            # loop.actor_eval is updated in _optimize -> refresh_policy_snapshot.
+            if shared_state["steps"] - last_snapshot_update > 100:
+                try:
+                    # Quick copy to avoid holding any locks for long
+                    state_dict = {k: v.clone() for k, v in loop.actor_eval.state_dict().items()}
+                    actor_snapshot.load_state_dict(state_dict)
+                    last_snapshot_update = shared_state["steps"]
+                except Exception:
+                    # If we catch a race condition (rare), just skip this update
+                    pass
+
+            with torch.no_grad():
+                policy_result = loop.step(
+                    observation_tensor,
+                    self_state=self_state_vec if self_state_vec.numel() > 0 else None,
+                    train=False,
+                    actor_model=actor_snapshot,
+                )
+            if device_index is not None:
+                torch.cuda.synchronize(device_index)
+            policy_result = _detach_step_result(policy_result)
             env_action = _select_env_action(policy_result.action, env.action_space.n)
             next_observation, env_reward, terminated, info = env.step(env_action)
             truncated = False
@@ -219,6 +265,11 @@ def _actor_loop(
                 policy_result.action,
                 next_tensor,
                 self_state_vec if self_state_vec.numel() > 0 else None,
+            )
+            loop.store_latent_transition(
+                policy_result.latent_snapshot,
+                policy_result.action,
+                next_tensor,
             )
             next_episode_steps = episode_steps + 1
             next_self_state_vec = _compute_self_state(
@@ -475,7 +526,6 @@ def main() -> None:
     num_workers = max(1, args.actor_workers)
     stop_event = threading.Event()
     steps_lock = threading.Lock()
-    policy_lock = threading.Lock()
     shared_state: Dict[str, int] = {"steps": 0, "episodes": 0, "last_video_step": 0}
     metrics_queue: Queue = Queue()
 
@@ -494,7 +544,6 @@ def main() -> None:
                 args.log_interval,
                 video_step_interval,
                 steps_lock,
-                policy_lock,
                 shared_state,
                 stop_event,
                 metrics_queue,
@@ -519,8 +568,7 @@ def main() -> None:
         while True:
             processed = logger.process_queue(metrics_queue)
 
-            with policy_lock:
-                optimize_result = loop._optimize()
+            optimize_result = loop._optimize()
 
             with steps_lock:
                 current_step = shared_state["steps"]
@@ -542,8 +590,7 @@ def main() -> None:
                     processed = True
                 last_flush_step = current_step
 
-            with policy_lock:
-                optimize_result = loop._optimize()
+            optimize_result = loop._optimize()
             if optimize_result:
                 step_index, training_metrics = optimize_result
                 training_metrics.setdefault(

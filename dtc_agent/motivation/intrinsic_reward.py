@@ -267,7 +267,7 @@ class IntrinsicRewardGenerator:
             "competence": self._scalers["competence"](r_comp),
             "empowerment": self._scalers["empowerment"](r_emp),
             "survival": self._scalers["survival"](r_survival),
-            "explore": r_explore,
+            "explore": self._scalers["explore"](r_explore),
         }
         lambda_comp = float(lambdas.get("comp", 0.0))
         lambda_emp = float(lambdas.get("emp", 0.0))
