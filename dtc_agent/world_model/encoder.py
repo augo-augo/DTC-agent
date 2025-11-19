@@ -179,7 +179,9 @@ class _SlotAttention(nn.Module):
                 # Force q^T contiguous so matmul can pick stable dense GEMM kernels.
                 q_t = q.transpose(1, 2).contiguous()
                 try:
-                    dots = torch.matmul(k, q_t) / (d**0.5)
+                    # Use bmm to enforce strict batch-matrix-multiply path
+                    # This avoids broken cublasSgemmStridedBatched on Blackwell (5090)
+                    dots = torch.bmm(k, q_t) * (d ** -0.5)
                 except RuntimeError as err:
                     if "cublas" in str(err).lower():
                         raise RuntimeError(
