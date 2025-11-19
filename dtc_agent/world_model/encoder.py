@@ -176,21 +176,13 @@ class _SlotAttention(nn.Module):
                 slots = self.norm_slots(slots).to(dtype=torch.float32)
 
                 q = self.project_q(slots).to(dtype=torch.float32)
-                # Force q^T contiguous so matmul can pick stable dense GEMM kernels.
-                q_t = q.transpose(1, 2).contiguous()
-                try:
-                    # Use bmm to enforce strict batch-matrix-multiply path
-                    # This avoids broken cublasSgemmStridedBatched on Blackwell (5090)
-                    dots = torch.bmm(k, q_t) * (d ** -0.5)
-                except RuntimeError as err:
-                    if "cublas" in str(err).lower():
-                        raise RuntimeError(
-                            "Slot Attention attention scores failed on CUDA. "
-                            f"inputs shape={inputs.shape}, num_slots={self.num_slots}. "
-                            "A zero dimensional configuration (e.g. encoder.num_slots=0) "
-                            "or empty spatial tokens will trigger this."
-                        ) from err
-                    raise
+
+                # Use einsum to bypass the broken cuBLAS StridedBatched kernel on RTX 5090
+                # k shape: [Batch, Inputs, Dim]
+                # q shape: [Batch, Slots, Dim]
+                # Result: [Batch, Inputs, Slots]
+                # We avoid explicit transposition which confuses the Blackwell driver.
+                dots = torch.einsum('b i d, b s d -> b i s', k, q) * (d ** -0.5)
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
