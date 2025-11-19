@@ -159,7 +159,15 @@ class _SlotAttention(nn.Module):
             print(f"DEBUG: SlotAttention inputs contain NaNs/Infs! Shape: {inputs.shape}")
         if not torch.isfinite(self.project_k.weight).all():
              print(f"DEBUG: project_k weights contain NaNs/Infs!")
-        # print(f"DEBUG: SlotAttention inputs shape: {inputs.shape}, project_k weight shape: {self.project_k.weight.shape}")
+        
+        # Force new allocation to ensure alignment
+        inputs = inputs.clone()
+        
+        if inputs.numel() == 0:
+             print("DEBUG: SlotAttention inputs empty, returning empty slots")
+             return torch.zeros(b, self.num_slots, self.dim, device=inputs.device, dtype=inputs.dtype)
+
+        print(f"DEBUG: SlotAttention inputs shape: {inputs.shape}, project_k weight shape: {self.project_k.weight.shape}")
 
         k = self.project_k(inputs)
         v = self.project_v(inputs)
