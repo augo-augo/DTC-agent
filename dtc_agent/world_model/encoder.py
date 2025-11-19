@@ -173,12 +173,9 @@ class _SlotAttention(nn.Module):
                 slots = self.norm_slots(slots).to(dtype=torch.float32)
 
                 q = self.project_q(slots).to(dtype=torch.float32)
-                # Force both k and q^T contiguous so matmul can pick stable dense GEMM kernels.
-                # k must be re-contiguous here even though it was made contiguous outside the loop
-                # because Blackwell GPUs require strict stride consistency for cublasSgemmStridedBatched.
-                k_contig = k.contiguous()
+                # Force q^T contiguous so matmul can pick stable dense GEMM kernels.
                 q_t = q.transpose(1, 2).contiguous()
-                dots = torch.matmul(k_contig, q_t) / (d**0.5)
+                dots = torch.matmul(k, q_t) / (d**0.5)
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
@@ -209,6 +206,8 @@ class SlotAttentionEncoder(nn.Module):
         self.config = config
         if config.slot_dim <= 0:
             raise ValueError(f"slot_dim must be positive, got {config.slot_dim}")
+        if config.num_slots <= 0:
+            raise ValueError(f"num_slots must be positive, got {config.num_slots}")
         if not config.cnn_channels:
             raise ValueError("cnn_channels must not be empty")
         if config.cnn_channels[-1] <= 0:
