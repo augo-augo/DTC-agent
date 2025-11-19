@@ -573,7 +573,7 @@ def main() -> None:
         actor_threads.append(thread)
 
     logger = WandBLogger(
-        max_pending_steps=5000,
+        max_pending_steps=10000,
         publish_interval=max(0, args.wandb_publish_interval),
         video_frame_stride=max(1, args.video_frame_stride),
         video_max_frames=max(1, args.video_max_frames),

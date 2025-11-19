@@ -1468,39 +1468,39 @@ class TrainingLoop:
                     latent_state = broadcast.mean(dim=1)
                     latent_drift_norms.append(torch.tensor(0.0, device=latent_state.device))
 
+                    # 1. Predict "Concept" (Latent State) directly
                     predictions = self.world_model.predict_next_latents(latent_state, executed_action)
-                    latent_samples = []
-                    for idx, dist in enumerate(predictions):
-                        if self.world_model.training:
-                            sample = dist.rsample()
-                            noise = torch.randn_like(sample) * (
-                                ensemble_noise_base + 0.02 * float(idx)
-                            )
-                            sample = sample + noise
-                        else:
-                            sample = dist.mean
-                        latent_samples.append(sample)
-                    decoded = self.world_model.decode_predictions(latent_samples, use_frozen=False)
-                    novelty_mix = dream_temporal_state.get("novelty_mix")
-                    novelty = self.reward.get_novelty(
-                        predictions, decoded, novelty_mix=novelty_mix
-                    )
-                    if self._step_count % 100 == 0:
-                        print(f"\n[Dream Novelty Diagnostic at step {self._step_count}]")
-                        print(
-                            "  Novelty: "
-                            f"mean={novelty.mean():.6f}, std={novelty.std():.6f}, "
-                            f"min={novelty.min():.6f}, max={novelty.max():.6f}"
-                        )
-                        if latent_drift_norms:
-                            print(
-                                f"  Latent drift norm (latest): {latent_drift_norms[-1].item():.6f}"
-                            )
-                        print(
-                            f"  Counterfactual rate (latest): {counterfactual_rates[-1].item():.3f}"
-                        )
-                    predicted_obs = decoded[0].rsample()
-                    observation_entropy = estimate_observation_entropy(predicted_obs)
+
+                    # 2. Calculate "Conceptual Novelty" (Pure Epistemic Disagreement)
+                    # We skip the expensive decoder entirely. Novelty is just ensemble variance.
+                    # Each prediction is a Normal(mu, sigma). We look at var(mu).
+                    stacked_means = torch.stack([p.mean for p in predictions])
+                    novelty = stacked_means.var(dim=0).mean(dim=-1)
+
+                    # 3. Latent Carryover (The "Aphantasia" Trick)
+                    # Instead of decoding to pixels and re-encoding, we sample the consensus latent
+                    # and assume it is truth.
+                    if self.world_model.training:
+                         # Sample from ensemble to maintain aleatoric uncertainty awareness
+                        next_latent_mean = torch.stack([p.rsample() for p in predictions]).mean(dim=0)
+                    else:
+                        next_latent_mean = stacked_means.mean(dim=0)
+
+                    # 4. "Phantom Slot" Expansion
+                    # The Actor expects [Batch, Num_Slots, Dim]. We have [Batch, Dim].
+                    # We broadcast the concept to all slots.
+                    num_slots = current_latents["slots"].shape[1]
+                    phantom_slots = next_latent_mean.unsqueeze(1).expand(-1, num_slots, -1)
+
+                    # 5. Update State for next step
+                    # Persist self-state (z_self) as we assume it's stable over the short dream horizon
+                    current_latents = {
+                        "z_self": current_latents["z_self"],
+                        "slots": phantom_slots
+                    }
+                    
+                    # Dummy entropy since we have no pixels
+                    observation_entropy = torch.zeros_like(novelty)
 
                     dream_novelty_values.append(float(novelty.detach().mean().item()))
 
@@ -1561,7 +1561,8 @@ class TrainingLoop:
                     log_probs.append(dream_log_prob)
                     entropies.append(dream_entropy)
 
-                    current_latents = self._call_with_fallback("world_model", predicted_obs)
+                    # REMOVE THIS LINE:
+                    # current_latents = self._call_with_fallback("world_model", predicted_obs)
                     memory_context = self._get_memory_context(current_latents["z_self"])
 
                 current_latents = {key: value.detach() for key, value in current_latents.items()}

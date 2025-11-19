@@ -1,0 +1,99 @@
+# configs/safe_memory.yaml
+
+# Inherit from low_memory defaults
+encoder:
+  observation_shape: [3, 64, 64]
+  slot_dim: 64
+  num_slots: 5
+  cnn_channels: [32, 64, 64]
+
+decoder:
+  observation_shape: [3, 64, 64]
+  slot_dim: 64
+  hidden_channels: [128, 64, 32]
+  initial_spatial: [4, 4]
+  activation: relu
+  output_activation: sigmoid
+  init_log_std: -1.0
+  learn_log_std: true
+
+dynamics:
+  latent_dim: 64
+  action_dim: 17
+  hidden_dim: 256
+  dropout: 0.4
+
+workspace:
+  broadcast_slots: 3
+  self_bias: 1.5
+  novelty_weight: 1.0
+  progress_weight: 0.6
+  cost_weight: 0.05
+  progress_momentum: 0.25
+  action_cost_scale: 1.0
+  ucb_weight: 0.4
+  ucb_beta: 1.0
+
+reward:
+  novelty_high: 2.0
+  component_clip: 3.0
+
+temporal_self:
+  stimulus_history_window: 1000
+
+# --- CRITICAL MEMORY FIXES ---
+# 1. Reduce Ensemble size (Linear memory savings)
+world_model_ensemble: 3       # Down from 5
+
+# 2. Reduce Batch Size (Linear memory savings)
+batch_size: 16                # Down from 64
+
+# 3. Reduce Horizon (Linear memory savings)
+dream_chunk_size: 5
+num_dream_chunks: 1           # Effective Horizon = 5 (Down from 10)
+
+# Result: 3 Models * 16 Batch * 5 Steps = 240 Active Graphs
+# This is ~13x smaller than your previous attempt (3200 graphs).
+# -----------------------------
+
+rollout_capacity: 1024
+
+empowerment:
+  latent_dim: 64
+  action_dim: 17
+  hidden_dim: 256
+  queue_capacity: 1024
+  temperature: 0.5
+
+episodic_memory:
+  capacity: 1000
+  key_dim: 64
+
+optimizer_lr: 0.0005
+optimizer_empowerment_weight: 0.05
+
+actor:
+  hidden_dim: 256
+  num_layers: 2
+  dropout: 0.05
+
+critic:
+  hidden_dim: 256
+  num_layers: 2
+  dropout: 0.05
+
+self_state_dim: 4
+discount_gamma: 0.99
+gae_lambda: 0.92
+entropy_coef: 0.05
+critic_coef: 0.5
+world_model_coef: 1.0
+device: cuda
+adaptive_entropy: true
+adaptive_entropy_target: 1.2
+adaptive_entropy_scale: 6.0
+dream_noise_base_ratio: 0.1
+dream_counterfactual_base_rate: 0.1
+dream_from_memory_rate: 0.5
+base_dream_horizon: 5
+max_horizon_multiplier: 4.0
