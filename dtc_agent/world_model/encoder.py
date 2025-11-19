@@ -177,18 +177,31 @@ class _SlotAttention(nn.Module):
 
                 q = self.project_q(slots).to(dtype=torch.float32)
 
-                # Use einsum to bypass the broken cuBLAS StridedBatched kernel on RTX 5090
+                # FIX: Blackwell/RTX 5090 cuBLAS workaround
+                # torch.einsum maps to cublasSgemmStridedBatched which fails with INVALID_VALUE
+                # on this architecture when strides are not perfectly aligned.
+                # We explicitly transpose and enforce contiguity to trigger the safer bmm kernel.
+                
                 # k shape: [Batch, Inputs, Dim]
                 # q shape: [Batch, Slots, Dim]
-                # Result: [Batch, Inputs, Slots]
-                # We avoid explicit transposition which confuses the Blackwell driver.
-                dots = torch.einsum('b i d, b s d -> b i s', k, q) * (d ** -0.5)
+                # Target: [Batch, Inputs, Slots]
+                
+                q_t = q.transpose(1, 2).contiguous()
+                k_c = k.contiguous()
+                dots = torch.bmm(k_c, q_t) * (d ** -0.5)
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
 
                 # Force attn^T contiguous to fix strided memory access on Blackwell GPUs
-                updates = torch.matmul(attn.transpose(1, 2).contiguous(), v)
+                # This corresponds to: updates = attn^T @ v
+                # attn shape: [Batch, Inputs, Slots]
+                # v shape:    [Batch, Inputs, Dim]
+                # Target:     [Batch, Slots, Dim]
+                
+                attn_t = attn.transpose(1, 2).contiguous()
+                v_c = v.contiguous()
+                updates = torch.bmm(attn_t, v_c)
 
                 slots = self.gru(
                     updates.reshape(-1, d),
