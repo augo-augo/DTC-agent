@@ -160,8 +160,9 @@ class _SlotAttention(nn.Module):
 
         with autocast_ctx:
             b, _, d = inputs.shape
-            # Force float32 to keep numerics stable for torch.compile on Blackwell GPUs.
-            inputs = self.norm_inputs(inputs).to(dtype=torch.float32)
+            # Force float32 BEFORE LayerNorm to prevent FP16 overflow in variance calc
+            inputs = inputs.to(dtype=torch.float32)
+            inputs = self.norm_inputs(inputs)
 
             mu = self.slot_mu.expand(b, self.num_slots, -1).to(dtype=torch.float32)
             sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0).to(dtype=torch.float32)
@@ -192,7 +193,8 @@ class _SlotAttention(nn.Module):
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
 
-                updates = torch.matmul(attn.transpose(1, 2), v)
+                # Force attn^T contiguous to fix strided memory access on Blackwell GPUs
+                updates = torch.matmul(attn.transpose(1, 2).contiguous(), v)
 
                 slots = self.gru(
                     updates.reshape(-1, d),
