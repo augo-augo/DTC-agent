@@ -173,9 +173,12 @@ class _SlotAttention(nn.Module):
                 slots = self.norm_slots(slots).to(dtype=torch.float32)
 
                 q = self.project_q(slots).to(dtype=torch.float32)
-                # Force q^T contiguous so matmul can pick stable dense GEMM kernels.
+                # Force both k and q^T contiguous so matmul can pick stable dense GEMM kernels.
+                # k must be re-contiguous here even though it was made contiguous outside the loop
+                # because Blackwell GPUs require strict stride consistency for cublasSgemmStridedBatched.
+                k_contig = k.contiguous()
                 q_t = q.transpose(1, 2).contiguous()
-                dots = torch.matmul(k, q_t) / (d**0.5)
+                dots = torch.matmul(k_contig, q_t) / (d**0.5)
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
