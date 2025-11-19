@@ -29,6 +29,7 @@ from dtc_agent.training import StepResult, TrainingLoop
 from dtc_agent.training.loop import LatentSnapshot
 from dtc_agent.training.wandb_logger import WandBLogger
 from dtc_agent.agents import ActorNetwork, ActorConfig
+from dtc_agent.world_model.ensemble import WorldModelEnsemble, WorldModelConfig
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -226,6 +227,17 @@ def _actor_loop(
         actor_snapshot = ActorNetwork(actor_cfg).to(runtime_device)
         actor_snapshot.load_state_dict(loop.actor_eval.state_dict())
         actor_snapshot.eval()
+
+        # World Model snapshot for lock-free inference
+        wm_config = WorldModelConfig(
+            encoder=config.encoder,
+            decoder=config.decoder,
+            dynamics=config.dynamics,
+            ensemble_size=config.world_model_ensemble,
+        )
+        wm_snapshot = WorldModelEnsemble(wm_config).to(runtime_device)
+        wm_snapshot.load_state_dict(loop.world_model.state_dict())
+        wm_snapshot.eval()
         last_snapshot_update = 0
 
         while not stop_event.is_set():
@@ -239,6 +251,9 @@ def _actor_loop(
                     # Quick copy to avoid holding any locks for long
                     state_dict = {k: v.clone() for k, v in loop.actor_eval.state_dict().items()}
                     actor_snapshot.load_state_dict(state_dict)
+
+                    wm_state = {k: v.clone() for k, v in loop.world_model.state_dict().items()}
+                    wm_snapshot.load_state_dict(wm_state)
                     last_snapshot_update = shared_state["steps"]
                 except Exception:
                     # If we catch a race condition (rare), just skip this update
@@ -250,6 +265,7 @@ def _actor_loop(
                     self_state=self_state_vec if self_state_vec.numel() > 0 else None,
                     train=False,
                     actor_model=actor_snapshot,
+                    world_model=wm_snapshot,
                 )
             if device_index is not None:
                 torch.cuda.synchronize(device_index)

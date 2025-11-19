@@ -476,9 +476,9 @@ class TrainingLoop:
         return 1.0 + (max_multiplier - 1.0) * scaled
 
     def _call_with_fallback(
-        self, attr: str, *args: P.args, **kwargs: P.kwargs
+        self, attr: str, *args: P.args, module_override: nn.Module | None = None, **kwargs: P.kwargs
     ) -> T:
-        module = cast(_CallableModule[P, T], getattr(self, attr))
+        module = cast(_CallableModule[P, T], module_override if module_override is not None else getattr(self, attr))
         amp_ctx = nullcontext()
         if attr == "world_model" and self.autocast_enabled and self.device.type == "cuda":
             try:
@@ -525,6 +525,7 @@ class TrainingLoop:
         self_state: torch.Tensor | None = None,
         train: bool = False,
         actor_model: nn.Module | None = None,
+        world_model: nn.Module | None = None,
     ) -> StepResult:
         """Perform a single interaction step and optional training update."""
 
@@ -540,6 +541,7 @@ class TrainingLoop:
                 self_state=self_state,
                 train=train,
                 actor_model=actor_model,
+                world_model=world_model,
             )
 
     def _step_impl(
@@ -550,6 +552,7 @@ class TrainingLoop:
         self_state: torch.Tensor | None = None,
         train: bool = False,
         actor_model: nn.Module | None = None,
+        world_model: nn.Module | None = None,
     ) -> StepResult:
         """Internal implementation of :meth:`step` without locking."""
         observation = observation.to(self.device, non_blocking=True)
@@ -598,7 +601,8 @@ class TrainingLoop:
         latent_snapshot: LatentSnapshot | None = None
 
         restore_world_model = False
-        if not train and self.world_model.training:
+        target_wm = world_model if world_model is not None else self.world_model
+        if world_model is None and not train and self.world_model.training:
             self.world_model.eval()
             restore_world_model = True
 
@@ -616,7 +620,7 @@ class TrainingLoop:
 
                             amp_ctx_disable = legacy_autocast(enabled=False)
                     with amp_ctx_disable:
-                        latents = self._call_with_fallback("world_model", observation)
+                        latents = self._call_with_fallback("world_model", observation, module_override=world_model)
                     memory_context = self._get_memory_context(latents["z_self"])
                 if action is not None:
                     action_for_routing = action.to(self.device, non_blocking=True)
@@ -701,9 +705,9 @@ class TrainingLoop:
                     slots=latents["slots"].detach(),
                     latent_state=latent_state.detach(),
                 )
-                predictions = self.world_model.predict_next_latents(latent_state, action)
-                decoded = self.world_model.decode_predictions(
-                    predictions, use_frozen=True, sample=self.world_model.training
+                predictions = target_wm.predict_next_latents(latent_state, action)
+                decoded = target_wm.decode_predictions(
+                    predictions, use_frozen=True, sample=target_wm.training
                 )
                 novelty_mix = None
                 if (
@@ -864,24 +868,24 @@ class TrainingLoop:
         if update_stats:
             self.novelty_tracker.update(slot_novelty.mean(dim=-1))
         if self._slot_baseline is None:
-            self._slot_baseline = slot_values.mean(dim=0).detach().cpu()
+            self._slot_baseline = slot_values.mean(dim=0).detach()
 
         if self._novelty_trace is None:
             slot_progress = torch.zeros_like(slot_novelty)
             if update_stats:
-                self._novelty_trace = slot_novelty.detach().cpu()
+                self._novelty_trace = slot_novelty.detach()
         else:
-            prev_trace = self._novelty_trace.to(self.device)
+            prev_trace = self._novelty_trace
             slot_progress = prev_trace - slot_novelty
             if update_stats:
                 updated_trace = (
                     (1 - self.progress_momentum) * self._novelty_trace
-                    + self.progress_momentum * slot_novelty.detach().cpu()
+                    + self.progress_momentum * slot_novelty.detach()
                 )
                 self._novelty_trace = updated_trace
 
         if update_stats:
-            baseline_update = slot_values.mean(dim=0).detach().cpu()
+            baseline_update = slot_values.mean(dim=0).detach()
             self._slot_baseline = (
                 (1 - self.progress_momentum) * self._slot_baseline
                 + self.progress_momentum * baseline_update
@@ -912,7 +916,7 @@ class TrainingLoop:
 
         self_mask = torch.clamp(self_similarity + state_similarity, min=0.0)
 
-        batch_mean = slot_novelty.mean(dim=0).detach().cpu()
+        batch_mean = slot_novelty.mean(dim=0).detach()
         if self._ucb_mean is None or self._ucb_counts is None:
             self._ucb_mean = batch_mean.clone()
             self._ucb_counts = torch.ones_like(batch_mean)
