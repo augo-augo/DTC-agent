@@ -11,14 +11,22 @@ decoder:
   initial_spatial: [4, 4]
   activation: relu
   output_activation: sigmoid
+
+decoder:
+  observation_shape: [3, 64, 64]
+  slot_dim: 64
+  hidden_channels: [256, 128, 64]
+  initial_spatial: [4, 4]
+  activation: relu
+  output_activation: sigmoid
   init_log_std: -1.0
   learn_log_std: true
 
 dynamics:
   latent_dim: 64
   action_dim: 17
-  hidden_dim: 256
-  dropout: 0.4  # Increased from 0.3 to force more ensemble disagreement
+  hidden_dim: 512
+  dropout: 0.1  # Latent dreaming is cleaner (less noise), so you don't need as much dropout to stabilize it.
 
 workspace:
   broadcast_slots: 3
@@ -75,29 +83,9 @@ episodic_memory:
   key_dim: 64
 
 rollout_capacity: 4096
-batch_size: 128
+batch_size: 256
 optimizer_lr: 0.0005
 optimizer_empowerment_weight: 0.05
-
-actor:
-  hidden_dim: 256
-  num_layers: 2
-  dropout: 0.05
-
-critic:
-  hidden_dim: 256
-  num_layers: 2
-  dropout: 0.05
-
-self_state_dim: 4  # Expanded to cover all Crafter vitals
-dream_chunk_size: 6
-num_dream_chunks: 3
-discount_gamma: 0.99
-gae_lambda: 0.92  # Decreased from 0.95 to stabilize critic advantage estimates
-entropy_coef: 0.05
-critic_coef: 0.5
-world_model_coef: 1.0
-
 world_model_ensemble: 5  # Increased from 3 to generate more epistemic novelty
 device: cuda
 
@@ -107,7 +95,7 @@ adaptive_entropy_scale: 6.0
 dream_noise_base_ratio: 0.1
 dream_counterfactual_base_rate: 0.1
 dream_from_memory_rate: 0.5
-base_dream_horizon: 18
+base_dream_horizon: 50
 max_horizon_multiplier: 8.0
 boredom_threshold: 0.5
 horizon_scaling_mode: sigmoid
