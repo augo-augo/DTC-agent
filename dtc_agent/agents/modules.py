@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import torch
 from torch import nn
 
@@ -94,11 +95,27 @@ class ActorNetwork(nn.Module):
         Returns:
             ``torch.distributions.Independent`` Normal over ``action_dim`` actions.
         """
+        # FIX: Blackwell/RTX 5090 workaround
+        # We disable autocast to force the linear heads to run in FP32.
+        # The cublasGemmEx kernel for FP16 (CUDA_R_16F) is crashing on this architecture
+        # for these specific layer dimensions.
 
-        features_float = features.float()
-        hidden = self.backbone(features_float)
-        mean = self.mean_head(hidden)
-        std = torch.exp(self.log_std).clamp(min=1e-4, max=10.0)
+        device_type = features.device.type
+        if device_type == "cuda":
+            ctx = torch.amp.autocast(device_type="cuda", enabled=False)
+        else:
+            ctx = nullcontext()
+
+        with ctx:
+            features_float = features.float()
+            hidden = self.backbone(features_float)
+
+            # Ensure contiguous memory layout before the final projection
+            hidden = hidden.contiguous()
+
+            mean = self.mean_head(hidden)
+            std = torch.exp(self.log_std.float()).clamp(min=1e-4, max=10.0)
+
         return torch.distributions.Independent(
             torch.distributions.Normal(mean, std),
             1,
@@ -134,7 +151,21 @@ class CriticNetwork(nn.Module):
         Returns:
             Tensor containing the value prediction for each batch element.
         """
+        # FIX: Blackwell/RTX 5090 workaround
+        # Disable autocast to avoid broken FP16 kernels in cuBLAS.
 
-        features_float = features.float()
-        hidden = self.backbone(features_float)
-        return self.value_head(hidden).squeeze(-1)
+        device_type = features.device.type
+        if device_type == "cuda":
+            ctx = torch.amp.autocast(device_type="cuda", enabled=False)
+        else:
+            ctx = nullcontext()
+
+        with ctx:
+            features_float = features.float()
+            hidden = self.backbone(features_float)
+
+            # Ensure contiguous memory layout before the final projection
+            hidden = hidden.contiguous()
+
+            value = self.value_head(hidden)
+            return value.squeeze(-1)
