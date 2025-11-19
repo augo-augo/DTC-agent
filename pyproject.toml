@@ -14,7 +14,7 @@ authors = [
     { name = "SC-GWT Team" }
 ]
 dependencies = [
-    "torch>=2.3",
+    "torch>=2.5.1",
     "numpy>=1.26",
     "einops>=0.7",
     "tqdm>=4.66",
