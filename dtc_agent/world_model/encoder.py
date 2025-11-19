@@ -173,8 +173,9 @@ class _SlotAttention(nn.Module):
                 slots = self.norm_slots(slots)
 
                 q = self.project_q(slots)
-                # Use torch.matmul to leverage more robust batched GEMM kernels on new GPUs.
-                dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
+                # Transpose k instead of q so matmul operates on the smaller slot dimension.
+                dots = torch.matmul(q, k.transpose(1, 2).contiguous()) / (d**0.5)
+                dots = dots.transpose(1, 2)
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
