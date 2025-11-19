@@ -173,8 +173,9 @@ class _SlotAttention(nn.Module):
                 slots = self.norm_slots(slots)
 
                 q = self.project_q(slots)
-                # Use einsum to avoid CUBLAS stride issues seen with batched GEMM on large token counts.
-                dots = torch.einsum("bid,bjd->bij", k, q) / (d**0.5)
+                # Force q^T contiguous so matmul can pick stable dense GEMM kernels.
+                q_t = q.transpose(1, 2).contiguous()
+                dots = torch.matmul(k, q_t) / (d**0.5)
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)

@@ -75,7 +75,7 @@ episodic_memory:
   key_dim: 64
 
 rollout_capacity: 4096
-batch_size: 256
+batch_size: 128
 optimizer_lr: 0.0005
 optimizer_empowerment_weight: 0.05
 world_model_ensemble: 5  # Increased from 3 to generate more epistemic novelty
