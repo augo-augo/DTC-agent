@@ -173,9 +173,8 @@ class _SlotAttention(nn.Module):
                 slots = self.norm_slots(slots)
 
                 q = self.project_q(slots)
-                # Ensure q^T is contiguous to avoid invalid CUBLAS strides under torch.bmm.
-                q_t = q.transpose(1, 2).contiguous()
-                dots = torch.bmm(k, q_t) / (d**0.5)
+                # Use torch.matmul to leverage more robust batched GEMM kernels on new GPUs.
+                dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
