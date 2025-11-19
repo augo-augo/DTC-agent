@@ -23,6 +23,13 @@ from typing import Dict, List, Tuple
 import crafter
 import numpy as np
 import torch
+
+# Disable TF32 on Blackwell GPUs (5090) to work around cuBLAS kernel bugs
+# If you still see CUBLAS_STATUS_INVALID_VALUE after setting num_slots=8,
+# uncomment the lines below to force PyTorch to use standard FP32 kernels:
+# torch.backends.cuda.matmul.allow_tf32 = False
+# torch.backends.cudnn.allow_tf32 = False
+
 import torch.nn.functional as F
 import wandb
 from omegaconf import OmegaConf
