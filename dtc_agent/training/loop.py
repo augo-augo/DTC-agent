@@ -459,7 +459,9 @@ class TrainingLoop:
             params.extend(self.self_state_predictor.parameters())
         self.optimizer = torch.optim.Adam(params, lr=config.optimizer_lr)
         self.optimizer_empowerment_weight = config.optimizer_empowerment_weight
-        self.autocast_enabled = self.device.type == "cuda"
+        # Blackwell/RTX 5090 workaround: force full precision to avoid
+        # cuBLAS crashes triggered by FP16 kernels.
+        self.autocast_enabled = False
         self.grad_scaler = _create_grad_scaler(self.device.type, self.autocast_enabled)
         self.novelty_tracker = RunningMeanStd(device=self.device)
 
