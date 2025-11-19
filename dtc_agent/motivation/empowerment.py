@@ -123,7 +123,15 @@ class InfoNCEEmpowermentEstimator(nn.Module):
 
         temperature = torch.clamp(self.temperature.detach(), min=0.05, max=5.0)
 
-        logits = torch.einsum("bd,bnd->bn", embedded_action, all_latents) / temperature
+        # FIX: Refactor einsum to avoid cuBLAS crash on RTX 5090 (Blackwell).
+        # The einsum operation triggers cublasGemmStridedBatchedEx, which fails
+        # with CUBLAS_STATUS_INVALID_VALUE on certain tensor shapes.
+        # We use explicit broadcasting and element-wise ops instead.
+        # embedded_action: [Batch, Dim] -> [Batch, 1, Dim]
+        # all_latents: [Batch, N, Dim]
+        # Result: [Batch, N]
+        query_expanded = embedded_action.unsqueeze(1)
+        logits = (query_expanded * all_latents).sum(dim=-1) / temperature
         logits = sanitize_tensor(logits, replacement=0.0)
         logits = torch.clamp(logits, min=-20.0, max=20.0)
 
