@@ -15,7 +15,7 @@ authors = [
 ]
 dependencies = [
     "torch>=2.5.1",
-    "numpy>=1.26",
+    "numpy>=1.26,<2",
     "einops>=0.7",
     "tqdm>=4.66",
     "omegaconf>=2.3",
@@ -35,3 +35,4 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["dtc_agent"]
+
