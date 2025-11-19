@@ -317,8 +317,7 @@ class WandBLogger:
         step = int(payload["step"])
         metrics = payload["metrics"]
         self._write_metrics_local(payload)
-        if not self._should_publish_step(step):
-            return
+        # Always log step metrics to wandb (publish_interval was breaking continuous updates)
         wandb.log(metrics, step=step)
         self._last_wandb_publish_step = step
         achievements = payload.get("achievements_count", 0)
