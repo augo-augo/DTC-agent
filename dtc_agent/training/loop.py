@@ -502,7 +502,8 @@ class TrainingLoop:
                 return module(*args, **kwargs)
         except Exception as err:
             message = str(err).lower()
-            needs_fallback = any(
+            is_oom = isinstance(err, torch.cuda.OutOfMemoryError) or "out of memory" in message
+            needs_fallback = is_oom or any(
                 snippet in message
                 for snippet in (
                     "symbolically trace a dynamo-optimized function",
@@ -515,6 +516,8 @@ class TrainingLoop:
             )
             if not needs_fallback or original_module is None:
                 raise
+            if is_oom and torch.cuda.is_available():
+                torch.cuda.empty_cache()
             original_module = original_module.to(self.device)
             original_module.train(module.training)
             setattr(self, attr, original_module)
