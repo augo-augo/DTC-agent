@@ -11,14 +11,6 @@ decoder:
   initial_spatial: [4, 4]
   activation: relu
   output_activation: sigmoid
-
-decoder:
-  observation_shape: [3, 64, 64]
-  slot_dim: 64
-  hidden_channels: [256, 128, 64]
-  initial_spatial: [4, 4]
-  activation: relu
-  output_activation: sigmoid
   init_log_std: -1.0
   learn_log_std: true
 
