@@ -169,13 +169,40 @@ class _SlotAttention(nn.Module):
 
         print(f"DEBUG: SlotAttention inputs shape: {inputs.shape}, project_k weight shape: {self.project_k.weight.shape}")
 
-        k = self.project_k(inputs)
-        v = self.project_v(inputs)
+        # Try running with autocast disabled first
+        try:
+            with torch.amp.autocast(device_type=inputs.device.type, enabled=False):
+                k = self.project_k(inputs.float())
+        except RuntimeError as e:
+            if "CUBLAS" in str(e):
+                print(f"DEBUG: CUDA error caught in project_k! Falling back to CPU. Error: {e}")
+                k = F.linear(inputs.cpu(), self.project_k.weight.cpu(), self.project_k.bias.cpu()).to(inputs.device)
+            else:
+                raise e
+
+        try:
+            with torch.amp.autocast(device_type=inputs.device.type, enabled=False):
+                v = self.project_v(inputs.float())
+        except RuntimeError as e:
+            if "CUBLAS" in str(e):
+                print(f"DEBUG: CUDA error caught in project_v! Falling back to CPU. Error: {e}")
+                v = F.linear(inputs.cpu(), self.project_v.weight.cpu(), self.project_v.bias.cpu()).to(inputs.device)
+            else:
+                raise e
 
         for _ in range(self.iters):
             slots_prev = slots
             slots = self.norm_slots(slots).contiguous()
-            q = self.project_q(slots)
+            
+            try:
+                with torch.amp.autocast(device_type=slots.device.type, enabled=False):
+                    q = self.project_q(slots.float())
+            except RuntimeError as e:
+                if "CUBLAS" in str(e):
+                    print(f"DEBUG: CUDA error caught in project_q! Falling back to CPU. Error: {e}")
+                    q = F.linear(slots.cpu(), self.project_q.weight.cpu(), self.project_q.bias.cpu()).to(slots.device)
+                else:
+                    raise e
 
             dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
             dots = torch.clamp(dots, min=-10.0, max=10.0)

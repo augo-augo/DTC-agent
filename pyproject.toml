@@ -22,7 +22,8 @@ dependencies = [
     "wandb[media]>=0.17",
     "gymnasium>=0.29",
     "minigrid>=2.3",
-    "crafter>=1.8.0"
+    "crafter>=1.8.0",
+    "faiss-cpu>=1.7.4"
 ]
 
 [project.optional-dependencies]
