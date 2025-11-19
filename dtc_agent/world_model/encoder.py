@@ -174,34 +174,50 @@ class _SlotAttention(nn.Module):
             for _ in range(self.iters):
                 slots_prev = slots
                 slots = self.norm_slots(slots).to(dtype=torch.float32)
-
                 q = self.project_q(slots).to(dtype=torch.float32)
 
-                # FIX: Blackwell/RTX 5090 cuBLAS workaround
-                # torch.einsum maps to cublasSgemmStridedBatched which fails with INVALID_VALUE
-                # on this architecture when strides are not perfectly aligned.
-                # We explicitly transpose and enforce contiguity to trigger the safer bmm kernel.
+                # FIX: Manual element-wise attention to bypass broken cuBLAS kernel.
+                # The standard 'bmm' or 'einsum' here triggers cublasSgemmStridedBatched,
+                # which fails on RTX 5090 (Blackwell) with INVALID_VALUE for these dimensions.
+                # We explicitly loop over the small 'slots' dimension (usually <16) and compute
+                # dot products using simple element-wise multiplication and summation.
+                # This guarantees we avoid the buggy GEMM path in the driver.
                 
-                # k shape: [Batch, Inputs, Dim]
-                # q shape: [Batch, Slots, Dim]
-                # Target: [Batch, Inputs, Slots]
+                # k shape: [B, Inputs, Dim]
+                # q shape: [B, Slots, Dim]
+                # Target:  [B, Inputs, Slots]
                 
-                q_t = q.transpose(1, 2).contiguous()
-                k_c = k.contiguous()
-                dots = torch.bmm(k_c, q_t) * (d ** -0.5)
+                dots_list = []
+                for i in range(self.num_slots):
+                    # q_vec: [B, Dim] -> [B, 1, Dim]
+                    q_vec = q[:, i, :].unsqueeze(1)
+                    # element-wise mul: [B, Inputs, Dim] * [B, 1, Dim] -> [B, Inputs, Dim]
+                    # sum(-1): [B, Inputs]
+                    dot_i = (k * q_vec).sum(dim=-1)
+                    dots_list.append(dot_i)
+                
+                # Stack results: [B, Inputs, Slots]
+                dots = torch.stack(dots_list, dim=-1) * (d ** -0.5)
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
 
-                # Force attn^T contiguous to fix strided memory access on Blackwell GPUs
-                # This corresponds to: updates = attn^T @ v
-                # attn shape: [Batch, Inputs, Slots]
-                # v shape:    [Batch, Inputs, Dim]
-                # Target:     [Batch, Slots, Dim]
+                # Use same safe approach for the weighted sum: updates = attn.T @ v
+                # attn shape: [B, Inputs, Slots]
+                # v shape:    [B, Inputs, Dim]
+                # Target:     [B, Slots, Dim]
                 
-                attn_t = attn.transpose(1, 2).contiguous()
-                v_c = v.contiguous()
-                updates = torch.bmm(attn_t, v_c)
+                updates_list = []
+                for i in range(self.num_slots):
+                    # attn_col: [B, Inputs] -> [B, Inputs, 1]
+                    attn_col = attn[:, :, i].unsqueeze(-1)
+                    # element-wise mul: [B, Inputs, 1] * [B, Inputs, Dim] -> [B, Inputs, Dim]
+                    # sum(1): [B, Dim]
+                    update_i = (attn_col * v).sum(dim=1)
+                    updates_list.append(update_i)
+                
+                # Stack results: [B, Slots, Dim]
+                updates = torch.stack(updates_list, dim=1)
 
                 slots = self.gru(
                     updates.reshape(-1, d),
