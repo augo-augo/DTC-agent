@@ -461,6 +461,7 @@ class TrainingLoop:
         self.optimizer_empowerment_weight = config.optimizer_empowerment_weight
         # Blackwell/RTX 5090 workaround: force full precision to avoid
         # cuBLAS crashes triggered by FP16 kernels.
+        # Force FP32 globally to avoid cublasGemmEx instability on Blackwell GPUs.
         self.autocast_enabled = False
         self.grad_scaler = _create_grad_scaler(self.device.type, self.autocast_enabled)
         self.novelty_tracker = RunningMeanStd(device=self.device)
@@ -1242,58 +1243,57 @@ class TrainingLoop:
                 "total": total_loss,
             }
 
+            valid_step = True
             for name, loss_val in loss_components.items():
                 if not torch.isfinite(loss_val):
-                    print(f"[STEP {self._step_count}] WARNING: Non-finite {name}_loss: {loss_val}")
-                    print("  Skipping optimization step to prevent parameter corruption")
-                    if self._step_count % 1000 == 0:
-                        torch.save(
-                            {
-                                "step": self._step_count,
-                                "world_model": module_state_dict(self.world_model),
-                                "actor": module_state_dict(self.actor),
-                                "critic": module_state_dict(self.critic),
-                            },
-                            f"/tmp/dtc_agent_checkpoint_step_{self._step_count}.pt",
-                        )
-                    for debug_name, debug_val in loss_components.items():
-                        val_str = (
-                            f"{debug_val.item():.4f}"
-                            if torch.isfinite(debug_val)
-                            else "NaN/Inf"
-                        )
-                        print(f"    {debug_name}: {val_str}")
-                    return None
+                    print(
+                        f"[STEP {self._step_count}] ⚠️ WARNING: Non-finite {name}_loss: {loss_val}"
+                    )
+                    loss_components[name] = torch.tensor(0.0, device=self.device)
+                    valid_step = False
 
-            # FIX: Blackwell/RTX 5090 workaround
-            # The backward pass for Linear layers can trigger cublasGemmEx crashes in FP16.
-            # We force the backward pass to run in FP32 by disabling autocast.
-            if self.autocast_enabled and self.device.type == "cuda":
-                try:
-                    backward_ctx = torch.amp.autocast(device_type=self.device.type, enabled=False)
-                except AttributeError:  # pragma: no cover - legacy AMP
-                    from torch.cuda.amp import autocast as legacy_autocast
-                    backward_ctx = legacy_autocast(enabled=False)
+            world_model_loss = loss_components["world_model"]
+            actor_loss = loss_components["actor"]
+            critic_loss = loss_components["critic"]
+            dream_loss = loss_components["dream"]
+            self_state_loss = loss_components["self_state"]
+            total_loss = loss_components["total"]
+
+            if not valid_step:
+                print("  Skipping gradient step due to NaN/Inf losses.")
+                total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
             else:
-                backward_ctx = nullcontext()
+                # FIX: Blackwell/RTX 5090 workaround
+                # The backward pass for Linear layers can trigger cublasGemmEx crashes in FP16.
+                # We force the backward pass to run in FP32 by disabling autocast.
+                if self.autocast_enabled and self.device.type == "cuda":
+                    try:
+                        backward_ctx = torch.amp.autocast(device_type=self.device.type, enabled=False)
+                    except AttributeError:  # pragma: no cover - legacy AMP
+                        from torch.cuda.amp import autocast as legacy_autocast
+                        backward_ctx = legacy_autocast(enabled=False)
+                else:
+                    backward_ctx = nullcontext()
 
-            with backward_ctx:
-                self.grad_scaler.scale(total_loss).backward()
+                with backward_ctx:
+                    self.grad_scaler.scale(total_loss).backward()
 
-            self.grad_scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+                self.grad_scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
 
-            bad_grads = sanitize_gradients(self.world_model)
-            bad_grads += sanitize_gradients(self.actor)
-            bad_grads += sanitize_gradients(self.critic)
-            bad_grads += sanitize_gradients(self.empowerment)
-            if bad_grads > 0:
-                print(f"[STEP {self._step_count}] WARNING: Sanitized {bad_grads} non-finite gradients")
+                bad_grads = sanitize_gradients(self.world_model)
+                bad_grads += sanitize_gradients(self.actor)
+                bad_grads += sanitize_gradients(self.critic)
+                bad_grads += sanitize_gradients(self.empowerment)
+                if bad_grads > 0:
+                    print(
+                        f"[STEP {self._step_count}] WARNING: Sanitized {bad_grads} non-finite gradients"
+                    )
 
-            self.grad_scaler.step(self.optimizer)
-            self.grad_scaler.update()
+                self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
 
             if (
                 self._step_count - self._last_snapshot_sync
@@ -1637,7 +1637,11 @@ class TrainingLoop:
         final_action = dream_actions[-1].detach()
         final_latent_state = final_broadcast.mean(dim=1).detach()
         empowerment_term = self.empowerment(final_action, final_latent_state).mean()
+        empowerment_term = torch.nan_to_num(
+            empowerment_term, nan=0.0, posinf=1e3, neginf=-1e3
+        )
         dream_loss = -self.optimizer_empowerment_weight * empowerment_term
+        dream_loss = dream_loss.clamp(min=-1e3, max=1e3)
 
         intrinsic_stack = torch.stack(intrinsic_terms)
         competence_stack = torch.stack(competence_terms)
