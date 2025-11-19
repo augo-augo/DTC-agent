@@ -176,7 +176,8 @@ class _SlotAttention(nn.Module):
         except RuntimeError as e:
             if "CUBLAS" in str(e):
                 print(f"DEBUG: CUDA error caught in project_k! Falling back to CPU. Error: {e}")
-                k = F.linear(inputs.cpu(), self.project_k.weight.cpu(), self.project_k.bias.cpu()).to(inputs.device)
+                bias_cpu = self.project_k.bias.cpu() if self.project_k.bias is not None else None
+                k = F.linear(inputs.cpu(), self.project_k.weight.cpu(), bias_cpu).to(inputs.device)
             else:
                 raise e
 
@@ -186,7 +187,8 @@ class _SlotAttention(nn.Module):
         except RuntimeError as e:
             if "CUBLAS" in str(e):
                 print(f"DEBUG: CUDA error caught in project_v! Falling back to CPU. Error: {e}")
-                v = F.linear(inputs.cpu(), self.project_v.weight.cpu(), self.project_v.bias.cpu()).to(inputs.device)
+                bias_cpu = self.project_v.bias.cpu() if self.project_v.bias is not None else None
+                v = F.linear(inputs.cpu(), self.project_v.weight.cpu(), bias_cpu).to(inputs.device)
             else:
                 raise e
 
@@ -200,7 +202,8 @@ class _SlotAttention(nn.Module):
             except RuntimeError as e:
                 if "CUBLAS" in str(e):
                     print(f"DEBUG: CUDA error caught in project_q! Falling back to CPU. Error: {e}")
-                    q = F.linear(slots.cpu(), self.project_q.weight.cpu(), self.project_q.bias.cpu()).to(slots.device)
+                    bias_cpu = self.project_q.bias.cpu() if self.project_q.bias is not None else None
+                    q = F.linear(slots.cpu(), self.project_q.weight.cpu(), bias_cpu).to(slots.device)
                 else:
                     raise e
 

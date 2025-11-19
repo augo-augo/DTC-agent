@@ -35,4 +35,3 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["dtc_agent"]
-
