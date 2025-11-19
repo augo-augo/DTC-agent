@@ -75,6 +75,6 @@ class DynamicsModel(nn.Module):
         mean, log_std = torch.chunk(params, 2, dim=-1)
         log_std = torch.clamp(log_std, -20.0, 2.0)
         std = torch.exp(log_std)
-        mean = mean.to(dtype=target_dtype)
-        std = std.to(dtype=target_dtype)
-        return Normal(mean, std)
+        # FIX: Blackwell/RTX 5090 workaround - explicitly return float32 distribution
+        # to ensure backward pass stays in FP32 (ignore target_dtype)
+        return Normal(mean.float(), std.float())

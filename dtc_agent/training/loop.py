@@ -1263,7 +1263,21 @@ class TrainingLoop:
                         print(f"    {debug_name}: {val_str}")
                     return None
 
-            self.grad_scaler.scale(total_loss).backward()
+            # FIX: Blackwell/RTX 5090 workaround
+            # The backward pass for Linear layers can trigger cublasGemmEx crashes in FP16.
+            # We force the backward pass to run in FP32 by disabling autocast.
+            if self.autocast_enabled and self.device.type == "cuda":
+                try:
+                    backward_ctx = torch.amp.autocast(device_type=self.device.type, enabled=False)
+                except AttributeError:  # pragma: no cover - legacy AMP
+                    from torch.cuda.amp import autocast as legacy_autocast
+                    backward_ctx = legacy_autocast(enabled=False)
+            else:
+                backward_ctx = nullcontext()
+
+            with backward_ctx:
+                self.grad_scaler.scale(total_loss).backward()
+
             self.grad_scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)

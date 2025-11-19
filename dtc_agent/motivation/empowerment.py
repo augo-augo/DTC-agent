@@ -163,7 +163,9 @@ class InfoNCEEmpowermentEstimator(nn.Module):
 
         self._enqueue_latents(latent.detach())
 
-        return -torch.clamp(loss, min=-10.0, max=10.0)
+        # FIX: Blackwell/RTX 5090 workaround - explicitly return float32
+        # to ensure backward pass stays in FP32
+        return -torch.clamp(loss.float(), min=-10.0, max=10.0)
 
     def _collect_negatives(self, latent: torch.Tensor) -> torch.Tensor:
         """Collect a diverse batch of negative samples from the replay queue."""
