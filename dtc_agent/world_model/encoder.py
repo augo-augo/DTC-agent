@@ -154,6 +154,13 @@ class _SlotAttention(nn.Module):
         sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
         slots = mu + sigma * torch.randn_like(mu)
 
+        # DEBUG: Check inputs before projection
+        if not torch.isfinite(inputs).all():
+            print(f"DEBUG: SlotAttention inputs contain NaNs/Infs! Shape: {inputs.shape}")
+        if not torch.isfinite(self.project_k.weight).all():
+             print(f"DEBUG: project_k weights contain NaNs/Infs!")
+        # print(f"DEBUG: SlotAttention inputs shape: {inputs.shape}, project_k weight shape: {self.project_k.weight.shape}")
+
         k = self.project_k(inputs)
         v = self.project_v(inputs)
 

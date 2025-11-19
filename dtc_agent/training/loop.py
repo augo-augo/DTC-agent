@@ -838,6 +838,7 @@ class TrainingLoop:
         snapshot: LatentSnapshot | None,
         action: torch.Tensor,
         next_observation: torch.Tensor,
+        world_model: nn.Module | None = None,
     ) -> None:
         """Persist latent transitions for episodic replay."""
 
@@ -851,7 +852,7 @@ class TrainingLoop:
         with torch.no_grad():
             with self._autocast_ctx():
                 next_obs = next_observation.to(self.device, non_blocking=True)
-                next_latents = self._call_with_fallback("world_model", next_obs)
+                next_latents = self._call_with_fallback("world_model", next_obs, module_override=world_model)
         target_latent = next_latents["slots"].mean(dim=1)
         self._write_memory(snapshot, action=action, target_latent=target_latent)
 

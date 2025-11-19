@@ -286,6 +286,7 @@ def _actor_loop(
                 policy_result.latent_snapshot,
                 policy_result.action,
                 next_tensor,
+                world_model=wm_snapshot,
             )
             next_episode_steps = episode_steps + 1
             next_self_state_vec = _compute_self_state(
