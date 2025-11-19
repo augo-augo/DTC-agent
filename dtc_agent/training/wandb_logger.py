@@ -8,10 +8,24 @@ import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Dict, List, MutableMapping
+from typing import Any, Dict, List, MutableMapping
 
 import numpy as np
 import wandb
+
+
+def _make_serializable(obj: Any) -> Any:
+    """Convert numpy types and nested containers into JSON-serializable data."""
+
+    if isinstance(obj, (np.ndarray, np.generic)):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {key: _make_serializable(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_make_serializable(item) for item in obj]
+    if isinstance(obj, tuple):
+        return [_make_serializable(item) for item in obj]
+    return obj
 
 
 class WandBLogger:
@@ -646,7 +660,8 @@ class WandBLogger:
         if self._video_metadata_path is None:
             return
         try:
-            text = json.dumps(metadata, ensure_ascii=False)
+            clean_metadata = _make_serializable(metadata)
+            text = json.dumps(clean_metadata, ensure_ascii=False)
         except Exception as exc:
             self._emit_console_warning(f"[LocalLog] Failed to serialize video metadata: {exc}")
             return

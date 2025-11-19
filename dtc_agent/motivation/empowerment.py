@@ -170,41 +170,24 @@ class InfoNCEEmpowermentEstimator(nn.Module):
         limit = min(available, capacity)
         current_ptr = int(self._queue_step.item()) % capacity
 
-        # CRITICAL: Exclude the most recent entries to avoid temporal correlation
-        # This prevents the queue from containing the current batch as negatives
-        if limit <= 1:
-            return self.latent_proj(latent.detach().float()).unsqueeze(1)
-
-        min_age = max(int(limit * 0.15), 16)
-        min_age = min(min_age, limit - max(batch, 16))
-
-        valid_indices: list[int] = []
-        for i in range(limit):
-            age = (current_ptr - i + capacity) % capacity
-            if age > min_age:
-                valid_indices.append(i)
-
-        if len(valid_indices) < max(8, batch):
-            exclusion_window = min(8, limit // 4)
-            valid_indices = [
-                i
-                for i in range(limit)
-                if (current_ptr - i + capacity) % capacity > exclusion_window
-            ]
+        safe_zone = max(batch * 2, 32)
+        if limit <= safe_zone:
+            noise = torch.randn_like(latent) * 0.1
+            return self.latent_proj((latent.detach() + noise).float()).unsqueeze(1)
 
         queue_tensor = self._queue[:limit]
         if queue_tensor.device != latent.device:
             queue_tensor = queue_tensor.to(latent.device, non_blocking=True)
 
-        valid_indices_tensor = torch.as_tensor(
-            valid_indices, device=latent.device, dtype=torch.long
-        )
+        all_indices = torch.arange(limit, device=latent.device, dtype=torch.long)
+        dist = (current_ptr - all_indices + capacity) % capacity
+        valid_mask = dist > safe_zone
+        valid_indices_tensor = all_indices[valid_mask]
 
         if valid_indices_tensor.numel() < batch:
             noise = torch.randn_like(latent) * 0.1
             return self.latent_proj((latent.detach() + noise).float()).unsqueeze(1)
 
-        # Sample without replacement
         num_negatives = batch
         perm = torch.randperm(valid_indices_tensor.numel(), device=latent.device)
         idx = valid_indices_tensor[perm[:num_negatives]]

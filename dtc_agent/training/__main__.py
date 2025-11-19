@@ -606,6 +606,8 @@ def main() -> None:
             if should_flush:
                 if logger.flush_pending():
                     processed = True
+                if logger.flush_training_only():
+                    processed = True
                 last_flush_step = current_step
 
             optimize_result = loop._optimize()
@@ -619,6 +621,8 @@ def main() -> None:
                 logger.add_training_metrics(training_metrics, target_step=current_step)
                 if current_step - last_flush_step >= flush_interval:
                     if logger.flush_pending():
+                        processed = True
+                    if logger.flush_training_only():
                         processed = True
                     last_flush_step = current_step
 
