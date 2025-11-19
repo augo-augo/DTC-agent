@@ -329,10 +329,12 @@ class WandBLogger:
             self._print_progress(step, metrics, worker_id=worker_id)
 
     def _log_metrics_only(self, step: int, metrics: Dict[str, float]) -> None:
-        self._write_metrics_local({"step": step, "metrics": metrics})
+        payload = dict(metrics)
+        payload.setdefault("step/total_steps", float(step))
+        self._write_metrics_local({"step": step, "metrics": payload})
         if not self._should_publish_step(step):
             return
-        wandb.log(metrics, step=step)
+        wandb.log(payload, step=step)
         self._last_wandb_publish_step = step
 
     def _log_video(self, message: Dict) -> None:
