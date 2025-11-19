@@ -140,6 +140,8 @@ class _SlotAttention(nn.Module):
             raise ValueError(
                 f"Slot Attention inputs last dimension must equal slot dim ({self.dim})"
             )
+        if self.num_slots <= 0:
+            raise ValueError("Slot Attention requires num_slots to be positive")
         if inputs.shape[1] <= 0:
             raise ValueError("Slot Attention requires at least one input token")
 
@@ -175,7 +177,17 @@ class _SlotAttention(nn.Module):
                 q = self.project_q(slots).to(dtype=torch.float32)
                 # Force q^T contiguous so matmul can pick stable dense GEMM kernels.
                 q_t = q.transpose(1, 2).contiguous()
-                dots = torch.matmul(k, q_t) / (d**0.5)
+                try:
+                    dots = torch.matmul(k, q_t) / (d**0.5)
+                except RuntimeError as err:
+                    if "cublas" in str(err).lower():
+                        raise RuntimeError(
+                            "Slot Attention attention scores failed on CUDA. "
+                            f"inputs shape={inputs.shape}, num_slots={self.num_slots}. "
+                            "A zero dimensional configuration (e.g. encoder.num_slots=0) "
+                            "or empty spatial tokens will trigger this."
+                        ) from err
+                    raise
 
                 attn = dots.softmax(dim=1) + self.epsilon
                 attn = attn / attn.sum(dim=2, keepdim=True)
