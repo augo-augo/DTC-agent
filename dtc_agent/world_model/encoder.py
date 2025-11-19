@@ -149,7 +149,7 @@ class _SlotAttention(nn.Module):
         sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
         slots = mu + sigma * torch.randn_like(mu)
 
-        k = self.project_k(inputs)
+        k = self.project_k(inputs).contiguous()
         v = self.project_v(inputs)
 
         for _ in range(self.iters):
@@ -157,7 +157,9 @@ class _SlotAttention(nn.Module):
             slots = self.norm_slots(slots)
 
             q = self.project_q(slots)
-            dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
+            # Ensure q^T is contiguous to avoid invalid CUBLAS strides under torch.bmm.
+            q_t = q.transpose(1, 2).contiguous()
+            dots = torch.bmm(k, q_t) / (d**0.5)
 
             attn = dots.softmax(dim=1) + self.epsilon
             attn = attn / attn.sum(dim=2, keepdim=True)
