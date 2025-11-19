@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -142,96 +141,36 @@ class _SlotAttention(nn.Module):
             )
         if inputs.shape[1] <= 0:
             raise ValueError("Slot Attention requires at least one input token")
-        if not torch.isfinite(inputs).all():
-            raise ValueError("Slot Attention inputs must be finite (no NaN or Inf values)")
+        b, _, d = inputs.shape
+        # Force float32 to keep numerics stable for torch.compile on Blackwell GPUs.
+        inputs = self.norm_inputs(inputs).to(dtype=torch.float32)
 
-        b, n, d = inputs.shape
-        if inputs.device.type == "cuda" and inputs.dtype != torch.float32:
-            inputs = inputs.float()
-        inputs = self.norm_inputs(inputs)
-        inputs = inputs.contiguous()
         mu = self.slot_mu.expand(b, self.num_slots, -1)
         sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
         slots = mu + sigma * torch.randn_like(mu)
 
-        # DEBUG: Check inputs before projection
-        if not torch.isfinite(inputs).all():
-            print(f"DEBUG: SlotAttention inputs contain NaNs/Infs! Shape: {inputs.shape}")
-        if not torch.isfinite(self.project_k.weight).all():
-             print(f"DEBUG: project_k weights contain NaNs/Infs!")
-        
-        # Force new allocation to ensure alignment
-        inputs = inputs.clone()
-        
-        if inputs.numel() == 0:
-             print("DEBUG: SlotAttention inputs empty, returning empty slots")
-             return torch.zeros(b, self.num_slots, self.dim, device=inputs.device, dtype=inputs.dtype)
-
-        print(f"DEBUG: SlotAttention inputs shape: {inputs.shape}, project_k weight shape: {self.project_k.weight.shape}")
-
-        # Try running with autocast disabled first
-        try:
-            with torch.amp.autocast(device_type=inputs.device.type, enabled=False):
-                k = self.project_k(inputs.float())
-        except RuntimeError as e:
-            if "CUBLAS" in str(e):
-                print(f"DEBUG: CUDA error caught in project_k! Falling back to CPU. Error: {e}")
-                bias_cpu = self.project_k.bias.cpu() if self.project_k.bias is not None else None
-                k = F.linear(inputs.cpu(), self.project_k.weight.cpu(), bias_cpu).to(inputs.device)
-            else:
-                raise e
-
-        try:
-            with torch.amp.autocast(device_type=inputs.device.type, enabled=False):
-                v = self.project_v(inputs.float())
-        except RuntimeError as e:
-            if "CUBLAS" in str(e):
-                print(f"DEBUG: CUDA error caught in project_v! Falling back to CPU. Error: {e}")
-                bias_cpu = self.project_v.bias.cpu() if self.project_v.bias is not None else None
-                v = F.linear(inputs.cpu(), self.project_v.weight.cpu(), bias_cpu).to(inputs.device)
-            else:
-                raise e
+        k = self.project_k(inputs)
+        v = self.project_v(inputs)
 
         for _ in range(self.iters):
             slots_prev = slots
-            slots = self.norm_slots(slots).contiguous()
-            
-            try:
-                with torch.amp.autocast(device_type=slots.device.type, enabled=False):
-                    q = self.project_q(slots.float())
-            except RuntimeError as e:
-                if "CUBLAS" in str(e):
-                    print(f"DEBUG: CUDA error caught in project_q! Falling back to CPU. Error: {e}")
-                    bias_cpu = self.project_q.bias.cpu() if self.project_q.bias is not None else None
-                    q = F.linear(slots.cpu(), self.project_q.weight.cpu(), bias_cpu).to(slots.device)
-                else:
-                    raise e
+            slots = self.norm_slots(slots)
 
+            q = self.project_q(slots)
             dots = torch.matmul(k, q.transpose(1, 2)) / (d**0.5)
-            dots = torch.clamp(dots, min=-10.0, max=10.0)
 
-            attn = dots.softmax(dim=-1) + self.epsilon
-            attn_sum = attn.sum(dim=-2, keepdim=True).clamp(min=1e-4)
-            attn = attn / attn_sum
+            attn = dots.softmax(dim=1) + self.epsilon
+            attn = attn / attn.sum(dim=2, keepdim=True)
 
             updates = torch.matmul(attn.transpose(1, 2), v)
 
-            updates_float = updates.reshape(-1, d).float()
-            slots_prev_float = slots_prev.reshape(-1, d).float()
-
-            device_type = updates_float.device.type
-            autocast_fn = getattr(torch.amp, "autocast", None)
-            if autocast_fn is not None and device_type in ("cuda", "cpu"):
-                autocast_ctx = autocast_fn(device_type=device_type, enabled=False)
-            else:
-                autocast_ctx = nullcontext()
-            with autocast_ctx:
-                slots = self.gru(
-                    updates_float,
-                    slots_prev_float.clone(),
-                )
+            slots = self.gru(
+                updates.reshape(-1, d),
+                slots_prev.reshape(-1, d),
+            )
             slots = slots.view(b, self.num_slots, d)
             slots = slots + self.mlp(self.norm_mlp(slots))
+
         return slots
 
 

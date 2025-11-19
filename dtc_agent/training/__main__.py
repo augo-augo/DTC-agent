@@ -31,8 +31,6 @@ from dtc_agent.training.wandb_logger import WandBLogger
 from dtc_agent.agents import ActorNetwork, ActorConfig
 from dtc_agent.world_model.ensemble import WorldModelEnsemble, WorldModelConfig
 
-torch.autograd.set_detect_anomaly(True)
-
 
 def _frame_to_chw(frame: np.ndarray) -> np.ndarray:
     array = np.asarray(frame)
