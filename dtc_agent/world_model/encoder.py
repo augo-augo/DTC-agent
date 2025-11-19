@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -141,39 +142,54 @@ class _SlotAttention(nn.Module):
             )
         if inputs.shape[1] <= 0:
             raise ValueError("Slot Attention requires at least one input token")
-        b, _, d = inputs.shape
-        # Force float32 to keep numerics stable for torch.compile on Blackwell GPUs.
-        inputs = self.norm_inputs(inputs).to(dtype=torch.float32)
 
-        mu = self.slot_mu.expand(b, self.num_slots, -1)
-        sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
-        slots = mu + sigma * torch.randn_like(mu)
+        device_type = inputs.device.type
+        if device_type == "cuda":
+            try:
+                autocast_ctx = torch.amp.autocast(
+                    device_type=device_type, enabled=False
+                )
+            except AttributeError:  # pragma: no cover - legacy torch fallback
+                from torch.cuda.amp import autocast as legacy_autocast  # type: ignore[attr-defined]
 
-        k = self.project_k(inputs).contiguous()
-        v = self.project_v(inputs)
+                autocast_ctx = legacy_autocast(enabled=False)
+        else:
+            autocast_ctx = nullcontext()
 
-        for _ in range(self.iters):
-            slots_prev = slots
-            slots = self.norm_slots(slots)
+        with autocast_ctx:
+            b, _, d = inputs.shape
+            # Force float32 to keep numerics stable for torch.compile on Blackwell GPUs.
+            inputs = self.norm_inputs(inputs).to(dtype=torch.float32)
 
-            q = self.project_q(slots)
-            # Ensure q^T is contiguous to avoid invalid CUBLAS strides under torch.bmm.
-            q_t = q.transpose(1, 2).contiguous()
-            dots = torch.bmm(k, q_t) / (d**0.5)
+            mu = self.slot_mu.expand(b, self.num_slots, -1)
+            sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
+            slots = mu + sigma * torch.randn_like(mu)
 
-            attn = dots.softmax(dim=1) + self.epsilon
-            attn = attn / attn.sum(dim=2, keepdim=True)
+            k = self.project_k(inputs).contiguous()
+            v = self.project_v(inputs)
 
-            updates = torch.matmul(attn.transpose(1, 2), v)
+            for _ in range(self.iters):
+                slots_prev = slots
+                slots = self.norm_slots(slots)
 
-            slots = self.gru(
-                updates.reshape(-1, d),
-                slots_prev.reshape(-1, d),
-            )
-            slots = slots.view(b, self.num_slots, d)
-            slots = slots + self.mlp(self.norm_mlp(slots))
+                q = self.project_q(slots)
+                # Ensure q^T is contiguous to avoid invalid CUBLAS strides under torch.bmm.
+                q_t = q.transpose(1, 2).contiguous()
+                dots = torch.bmm(k, q_t) / (d**0.5)
 
-        return slots
+                attn = dots.softmax(dim=1) + self.epsilon
+                attn = attn / attn.sum(dim=2, keepdim=True)
+
+                updates = torch.matmul(attn.transpose(1, 2), v)
+
+                slots = self.gru(
+                    updates.reshape(-1, d),
+                    slots_prev.reshape(-1, d),
+                )
+                slots = slots.view(b, self.num_slots, d)
+                slots = slots + self.mlp(self.norm_mlp(slots))
+
+            return slots
 
 
 class SlotAttentionEncoder(nn.Module):
