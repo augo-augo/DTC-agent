@@ -26,7 +26,7 @@ from omegaconf import OmegaConf
 
 from dtc_agent.config import load_training_config
 from dtc_agent.training import StepResult, TrainingLoop
-from dtc_agent.training.loop import LatentSnapshot
+from dtc_agent.training.loop import LatentSnapshot, module_state_dict
 from dtc_agent.training.wandb_logger import WandBLogger
 from dtc_agent.agents import ActorNetwork, ActorConfig
 from dtc_agent.world_model.ensemble import WorldModelEnsemble, WorldModelConfig
@@ -223,7 +223,7 @@ def _actor_loop(
             dropout=config.actor.dropout,
         )
         actor_snapshot = ActorNetwork(actor_cfg).to(runtime_device)
-        actor_snapshot.load_state_dict(loop.actor_eval.state_dict())
+        actor_snapshot.load_state_dict(module_state_dict(loop.actor_eval))
         actor_snapshot.eval()
 
         # World Model snapshot for lock-free inference
@@ -234,7 +234,7 @@ def _actor_loop(
             ensemble_size=config.world_model_ensemble,
         )
         wm_snapshot = WorldModelEnsemble(wm_config).to(runtime_device)
-        wm_snapshot.load_state_dict(loop.world_model.state_dict())
+        wm_snapshot.load_state_dict(module_state_dict(loop.world_model))
         wm_snapshot.eval()
         last_snapshot_update = 0
 
@@ -247,10 +247,10 @@ def _actor_loop(
             if shared_state["steps"] - last_snapshot_update > 100:
                 try:
                     # Quick copy to avoid holding any locks for long
-                    state_dict = {k: v.clone() for k, v in loop.actor_eval.state_dict().items()}
+                    state_dict = {k: v.clone() for k, v in module_state_dict(loop.actor_eval).items()}
                     actor_snapshot.load_state_dict(state_dict)
 
-                    wm_state = {k: v.clone() for k, v in loop.world_model.state_dict().items()}
+                    wm_state = {k: v.clone() for k, v in module_state_dict(loop.world_model).items()}
                     wm_snapshot.load_state_dict(wm_state)
                     last_snapshot_update = shared_state["steps"]
                 except Exception:

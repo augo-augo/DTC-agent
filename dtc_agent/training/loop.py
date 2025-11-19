@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from contextlib import nullcontext
+from collections import OrderedDict
 import math
 import threading
 from typing import Any, Callable, ContextManager, ParamSpec, Protocol, TypeVar, cast
@@ -70,6 +71,15 @@ def _resolve_compile() -> Callable[[nn.Module], nn.Module]:
 
 
 _maybe_compile = _resolve_compile()
+
+
+def module_state_dict(module: nn.Module) -> OrderedDict[str, torch.Tensor]:
+    """Return a clean state_dict even if ``module`` was torch.compile'd."""
+
+    original = getattr(module, "_orig_mod", None)
+    if isinstance(original, nn.Module):
+        module = original
+    return module.state_dict()
 
 
 class _NullGradScaler:
@@ -411,7 +421,7 @@ class TrainingLoop:
             self.actor = actor_net
             self.critic = critic_net
         self.actor_eval = ActorNetwork(actor_cfg).to(self.device)
-        self.actor_eval.load_state_dict(self.actor.state_dict())
+        self.actor_eval.load_state_dict(module_state_dict(self.actor))
         self.actor_eval.eval()
 
         self.self_state_dim = config.self_state_dim
@@ -982,7 +992,7 @@ class TrainingLoop:
         """Update the inference policy copy with the latest trained weights."""
 
         with torch.no_grad():
-            self.actor_eval.load_state_dict(self.actor.state_dict())
+            self.actor_eval.load_state_dict(module_state_dict(self.actor))
             self.actor_eval.eval()
 
     def _emergency_reset_if_corrupted(self) -> bool:
@@ -1235,9 +1245,9 @@ class TrainingLoop:
                     torch.save(
                         {
                             "step": self._step_count,
-                            "world_model": self.world_model.state_dict(),
-                            "actor": self.actor.state_dict(),
-                            "critic": self.critic.state_dict(),
+                            "world_model": module_state_dict(self.world_model),
+                            "actor": module_state_dict(self.actor),
+                            "critic": module_state_dict(self.critic),
                         },
                         f"/tmp/dtc_agent_checkpoint_step_{self._step_count}.pt",
                     )
