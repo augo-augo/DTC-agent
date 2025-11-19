@@ -161,18 +161,18 @@ class _SlotAttention(nn.Module):
             # Force float32 to keep numerics stable for torch.compile on Blackwell GPUs.
             inputs = self.norm_inputs(inputs).to(dtype=torch.float32)
 
-            mu = self.slot_mu.expand(b, self.num_slots, -1)
-            sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0)
-            slots = mu + sigma * torch.randn_like(mu)
+            mu = self.slot_mu.expand(b, self.num_slots, -1).to(dtype=torch.float32)
+            sigma = F.softplus(self.slot_sigma).clamp(min=0.1, max=2.0).to(dtype=torch.float32)
+            slots = (mu + sigma * torch.randn_like(mu)).to(dtype=torch.float32)
 
-            k = self.project_k(inputs).contiguous()
-            v = self.project_v(inputs)
+            k = self.project_k(inputs).contiguous().to(dtype=torch.float32)
+            v = self.project_v(inputs).to(dtype=torch.float32)
 
             for _ in range(self.iters):
                 slots_prev = slots
-                slots = self.norm_slots(slots)
+                slots = self.norm_slots(slots).to(dtype=torch.float32)
 
-                q = self.project_q(slots)
+                q = self.project_q(slots).to(dtype=torch.float32)
                 # Force q^T contiguous so matmul can pick stable dense GEMM kernels.
                 q_t = q.transpose(1, 2).contiguous()
                 dots = torch.matmul(k, q_t) / (d**0.5)
@@ -186,8 +186,8 @@ class _SlotAttention(nn.Module):
                     updates.reshape(-1, d),
                     slots_prev.reshape(-1, d),
                 )
-                slots = slots.view(b, self.num_slots, d)
-                slots = slots + self.mlp(self.norm_mlp(slots))
+                slots = slots.view(b, self.num_slots, d).to(dtype=torch.float32)
+                slots = slots + self.mlp(self.norm_mlp(slots)).to(dtype=torch.float32)
 
             return slots
 
@@ -215,11 +215,6 @@ class SlotAttentionEncoder(nn.Module):
         c, h, w = config.observation_shape
         self.backbone = _ConvBackbone(c, config.cnn_channels, config.kernel_size)
         feature_dim = config.cnn_channels[-1]
-        if feature_dim != config.slot_dim:
-            raise ValueError(
-                "pre_slots input dimension does not match Slot Attention dim: "
-                f"feature_dim={feature_dim}, slot_dim={config.slot_dim}"
-            )
         self.positional = _PositionalEmbedding(feature_dim, h, w)
         self.pre_slots = nn.Linear(feature_dim, config.slot_dim)
         self.slot_attention = _SlotAttention(
