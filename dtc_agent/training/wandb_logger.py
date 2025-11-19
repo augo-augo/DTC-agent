@@ -332,8 +332,7 @@ class WandBLogger:
         payload = dict(metrics)
         payload.setdefault("step/total_steps", float(step))
         self._write_metrics_local({"step": step, "metrics": payload})
-        if not self._should_publish_step(step):
-            return
+        # Always log training metrics to wandb (they're infrequent and contain critical info)
         wandb.log(payload, step=step)
         self._last_wandb_publish_step = step
 
